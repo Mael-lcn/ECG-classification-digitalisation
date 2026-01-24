@@ -10,11 +10,11 @@ import multiprocessing
 
 
 def preprocessing(patch_item):
-
+    pass
 
 
 def prepare_statistic(data, stats):
-
+    pass
 
 
 def run(args):

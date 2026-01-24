@@ -3,6 +3,8 @@ import h5py
 import numpy as np
 from pathlib import Path
 
+
+
 def wdfb_to_hdf5(dataset_path, output_file):
     print(f"Processing: {dataset_path}")
 
@@ -18,7 +20,7 @@ def wdfb_to_hdf5(dataset_path, output_file):
         for hea_file in sorted(g.glob("*.hea")):
             record_name = hea_file.stem # Get file name as exam id
             record_path = str(hea_file.with_suffix("")) # Get path without extension
-            
+
             record = wfdb.rdrecord(record_path)
             # Decode ECG signal in mV, shape=(n_samples, n_leads)
             signal = record.p_signal.astype(np.float32)
