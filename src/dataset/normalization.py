@@ -20,10 +20,12 @@ def worker1(couple, output):
     name, path = couple
 
     dataset, csv = load(path)
-    dataset_norm = re_sampling(dataset, csv)
-    dataset_norm = z_norm(dataset_norm, csv)
+    time_serries_norm = re_sampling(dataset, csv)
+    dataset['tracings'] = time_serries_norm
 
-    write_results(dataset_norm, name, output)
+    z_norm(dataset['tracings'], csv)
+
+    write_results(dataset, name, output)
 
 
 def worker2(couple, output):
@@ -48,7 +50,7 @@ def run(args):
     patch_dict1 = collect_files(args.dataset1)
 
     # Vérifie que des données ont été récoltés
-    if not patch_items1:
+    if not patch_dict1:
         print("Erreur: aucune données trouvé dans dataset1")
         return
 
@@ -97,9 +99,6 @@ def main():
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
 
     args = parser.parse_args()
-
-    # Supprime le dossier et tout ce qu'il contient pour clean avant de commencer
-    shutil.rmtree(args.output)
 
     run(args)
 
