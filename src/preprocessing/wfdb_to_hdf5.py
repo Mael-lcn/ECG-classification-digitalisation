@@ -1,14 +1,19 @@
+import argparse
+import time
 import wfdb
 import h5py
 import numpy as np
 from pathlib import Path
+from tqdm import tqdm
+import multiprocessing
 
-def wdfb_to_hdf5(dataset_path, output_file):
-    print(f"Processing: {dataset_path}")
+def wfdb_to_hdf5(dataset_dir_out):
+    dataset_dir, out_root = dataset_dir_out
+    dataset_dir = Path(dataset_dir)
+    out_file = out_root / f"{dataset_dir.name}.hdf5"
 
     # Get all group folders in the dataset
-    g_folders = sorted(dataset_path.glob("g*"))
-
+    g_folders = sorted(dataset_dir.glob("g*"))
     exam_ids = []
     signals = []
     max_n_samples = 0
@@ -29,13 +34,9 @@ def wdfb_to_hdf5(dataset_path, output_file):
             if signal.shape[0] > max_n_samples:
                 max_n_samples = signal.shape[0]
 
-    # Debugging info
     n_ecg = len(signals)
     n_leads = signals[0].shape[1]
-    print(f"Number of ECGs: {n_ecg}")
-    print(f"Max number samples in dataset: {max_n_samples}")
-    print(f"Number of leads: {n_leads}")
-
+    
     # Initialize tracings with zeros
     tracings = np.zeros(
         (n_ecg, max_n_samples, n_leads),
@@ -48,7 +49,7 @@ def wdfb_to_hdf5(dataset_path, output_file):
         tracings[i, :n_samples, :] = sig
 
     # Create hdf5 file
-    with h5py.File(output_file, "w") as f:
+    with h5py.File(out_file, "w") as f:
         f.create_dataset(
             "exam_id",
             data=np.array(exam_ids, dtype=("S")) # p.s. in hdf5 the strings are stored as bytes  
@@ -58,17 +59,46 @@ def wdfb_to_hdf5(dataset_path, output_file):
             data=tracings
         )
 
-    print(f"Saving hdf5 file: {out_file}")
+    return dataset_dir.name
 
 
-TRAIN_ROOT = Path("PATH TO DATASETS") # e.g., data/physioNet/training
-OUT_ROOT = Path("PATH TO OUTPUT FOLDER") # e.g., data/hdf5_output
-OUT_ROOT.mkdir(exist_ok=True)
+def run(args):
+    start_time = time.time()
 
-# Loop through each dataset 
-for dataset_dir in sorted(TRAIN_ROOT.iterdir()):
-    if not dataset_dir.is_dir():
-        continue
-    out_file = OUT_ROOT / f"{dataset_dir.name}.hdf5"
-    wdfb_to_hdf5(dataset_dir, out_file)
+    train_root = Path(args.input)
+    out_root = Path(args.output)
+    out_root.mkdir(parents=True, exist_ok=True)
 
+    dataset_dirs = [
+        d for d in sorted(train_root.iterdir())
+        if d.is_dir()
+    ]
+
+    dataset_items = [(d, out_root) for d in dataset_dirs]
+
+    with multiprocessing.get_context("spawn").Pool(args.workers) as pool:
+        with tqdm(total=len(dataset_items)) as pbar:
+            pbar.set_description(f"Converting WFDB datasets to HDF5")
+            for result in pool.imap_unordered(wfdb_to_hdf5, dataset_items):
+                if result is not None:
+                    pbar.update()
+                    #tqdm.write(f"Finished {result}")
+
+    elapsed = time.time() - start_time
+    minutes = int(elapsed // 60)
+    seconds = int(elapsed % 60)
+    print(f"Completed in {minutes} minutes and {seconds} seconds")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--input", type=str, default="../../data/physioNet")
+    parser.add_argument("-o", "--output", type=str, default="../output/hdf5/")
+    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count() - 1)
+
+    args = parser.parse_args()
+    run(args)
+
+
+if __name__ == "__main__":
+    main()
