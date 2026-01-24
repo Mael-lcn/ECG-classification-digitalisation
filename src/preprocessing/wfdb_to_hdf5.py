@@ -4,11 +4,15 @@ import wfdb
 import h5py
 import numpy as np
 from pathlib import Path
+from tqdm import tqdm
+import multiprocessing
 
 
 
-def wdfb_to_hdf5(dataset_path, output_file):
-    print(f"Processing: {dataset_path}")
+def wfdb_to_hdf5(dataset_dir_out):
+    dataset_dir, out_root = dataset_dir_out
+    dataset_dir = Path(dataset_dir)
+    out_file = out_root / f"{dataset_dir.name}.hdf5"
 
     # Get all group folders in the dataset
     g_folders = sorted(dataset_dir.glob("g*"))
@@ -21,7 +25,7 @@ def wdfb_to_hdf5(dataset_path, output_file):
         for hea_file in sorted(g.glob("*.hea")):
             record_name = hea_file.stem # Get file name as exam id
             record_path = str(hea_file.with_suffix("")) # Get path without extension
-
+            
             record = wfdb.rdrecord(record_path)
             # Decode ECG signal in mV, shape=(n_samples, n_leads)
             signal = record.p_signal.astype(np.float32)
