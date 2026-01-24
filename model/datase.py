@@ -66,7 +66,7 @@ class LargeH5Dataset(Dataset):
         else:
             local_idx = idx - self.cumulative_sizes[file_idx - 1]
 
-        # 3. On vérifie si le fichier nécessaire est DÉJÀ ouvert.
+        # 3. On vérifie si le fichier nécessaire est déjà ouvert.
         if self.current_file_idx != file_idx:
             # Si un autre fichier était ouvert, on le ferme proprement
             if self.file_handle is not None:
@@ -81,7 +81,7 @@ class LargeH5Dataset(Dataset):
         exam_id = self.file_handle['exam_id'][local_idx]
 
         # 5. Conversion en Tensor PyTorch
-        # torch.from_numpy crée un Tensor qui partage la mémoire si possible (rapide)
+        # torch.from_numpy crée un Tensor qui partage la mémoire si possible
         return torch.from_numpy(tracing), str(exam_id)
 
 
