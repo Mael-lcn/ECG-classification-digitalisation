@@ -5,7 +5,7 @@ import torch.nn.functional as F
 class CNN(nn.Module):
     def __init__(
         self,
-        num_classes: int,
+        num_classes: int = 27,
         in_channels: int = 12,
         ch1: int = 32,
         ch2: int = 64,
@@ -17,7 +17,7 @@ class CNN(nn.Module):
         Simple 3-layer 1D CNN for ECG classification
 
         Args:
-            num_classes: Number of output classes
+            num_classes: Number of output classes (default 27)
             in_channels: Number of ECG leads (default 12)
             ch1, ch2, ch3: Number of channels in conv layers
             kernel_size: Conv kernel size (for now same for all layers cuz 400Hz, might tune later)
