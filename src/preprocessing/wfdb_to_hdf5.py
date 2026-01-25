@@ -8,6 +8,7 @@ from tqdm import tqdm
 import multiprocessing
 
 
+
 def wfdb_to_hdf5(dataset_dir_out):
     dataset_dir, out_root = dataset_dir_out
     dataset_dir = Path(dataset_dir)
@@ -24,7 +25,7 @@ def wfdb_to_hdf5(dataset_dir_out):
         for hea_file in sorted(g.glob("*.hea")):
             record_name = hea_file.stem # Get file name as exam id
             record_path = str(hea_file.with_suffix("")) # Get path without extension
-            
+
             record = wfdb.rdrecord(record_path)
             # Decode ECG signal in mV, shape=(n_samples, n_leads)
             signal = record.p_signal.astype(np.float32)
@@ -94,8 +95,8 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", type=str, default="../../data/physioNet")
-    parser.add_argument("-o", "--output", type=str, default="../output/hdf5/")
-    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count() - 1)
+    parser.add_argument("-o", "--output", type=str, default="../output/dataset1/")
+    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
 
     args = parser.parse_args()
     run(args)

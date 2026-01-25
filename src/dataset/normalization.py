@@ -93,8 +93,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d1', '--dataset1', type=str, default='../../data/physioNet/')
-    parser.add_argument('-d2', '--dataset2', type=str, default='../../data/15_prct/')
+    parser.add_argument('-d1', '--dataset1', type=str, default='../output/dataset1/')
+    parser.add_argument('-d2', '--dataset2', type=str, default='../../../data/15_prct/')
     parser.add_argument('-o', '--output', type=str, default='../output/data')
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
 
