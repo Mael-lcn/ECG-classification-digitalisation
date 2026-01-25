@@ -62,51 +62,109 @@ def write_results(data_dict, name, output_dir):
     Méthode de la partie 1
 """
 def re_sampling(data, csv, fo=400):
-    tracings = data['tracings'] # Shape (N, Value, Channels)
-    all_ids = data['exam_id']   # Shape (N,)
+    """
+    Rééchantillonnage intelligent (Two-Pass strategy).
 
-    # Crée un mAPPING: ID -> Index (Rang)
+    Problème : On a des signaux de fréquences ET de durées variées.
+    - Un signal 100Hz de 10s fait 1000 points. -> Devient 4000 points à 400Hz.
+    - Un signal 500Hz de 10s fait 5000 points. -> Devient 4000 points à 400Hz.
+
+    On ne peut pas deviner la taille du tableau final sans regarder la longueur 'utile'
+    de chaque signal avant de commencer.
+    """
+    tracings = data['tracings'] # Shape (N, Total_Buffer_Len, Channels)
+    all_ids = data['exam_id']
+
+    # Mapping ID -> Index
     id_map = {
         (x.decode('utf-8') if isinstance(x, bytes) else str(x)): i 
         for i, x in enumerate(all_ids)
     }
 
-    # On prend la première fréquence trouvée dans le CSV pour calculer la taille cible théorique
-    ref_freq = csv['frequences'].iloc[0]
-    old_len = tracings.shape[1]
-
-    new_len = int(old_len * fo / ref_freq)
-    
-    # Shape : (N, NEW_LEN, Channels)
-    new_tracings = np.zeros((tracings.shape[0], new_len, tracings.shape[2]), dtype=tracings.dtype)
-
+    # Regroupement par fréquence
     freq_to_id = csv.groupby('frequences')['id'].apply(list).to_dict()
 
+    # --- PASSE 1 : CALCUL DE LA TAILLE MAXIMALE REQUISE ---
+    max_required_len = 0
+
+    # On stocke les infos de découpe pour ne pas les recalculer à la passe 2
+    groups_metadata = {} 
+
     for fi, ids_list in freq_to_id.items():
-        # Conversion des IDs (str) en Indices (int) via la map
-        indexes = [id_map[x] for x in ids_list if x in id_map]
+        indexes = [id_map[str(x)] for x in ids_list if str(x) in id_map]
+        if not indexes: continue
 
-        if not indexes:
-            raise ValueError(f"Erreur, aucun indexes pour les ids: {ids_list} de frequence {fi}")
+        # On regarde ce lot brut
+        batch = tracings[indexes] 
 
-        # Extraction du lot à traiter
-        batch = tracings[indexes]
+        # Détection de la longueur utile (On admet que les 0 de padding sont à la fin)
+        # On cherche la dernière colonne qui n'est pas vide
+        # (N, T, C) -> On écrase N (0) et C (2) pour ne garder que le profil Temporel (T,)
+        # Cela produit un vecteur 1D directement : [0.0, 0.5, 0.8, ... 0.0, 0.0]
+        time_profile = np.max(np.abs(batch), axis=(0, 2))
 
-        # Paramètres de resampling
+        active_indices = np.flatnonzero(time_profile > 1e-6)
+
+        if active_indices.size > 0:
+            # On prend le dernier index actif + 1
+            real_len = active_indices[-1] + 1
+        else:
+            real_len = 0
+
+        # Calcul de la taille projetée après resampling
+        # Formule : N_out = N_in * (F_out / F_in)
+        if real_len > 0:
+            projected_len = int(np.ceil(real_len * fo / fi))
+        else:
+            projected_len = 0
+
+        # On met à jour le record global
+        if projected_len > max_required_len:
+            max_required_len = projected_len
+
+        # On sauvegarde les métadonnées pour aller vite ensuite
+        groups_metadata[fi] = {
+            'indexes': indexes,
+            'real_len': real_len,
+            'projected_len': projected_len
+        }
+
+    # Sécurité : Si tout est vide
+    if max_required_len == 0:
+        return np.zeros((tracings.shape[0], 1, tracings.shape[2]), dtype=np.float32)
+
+    # On crée le tableau de taille max sur T
+    new_tracings = np.zeros((tracings.shape[0], max_required_len, tracings.shape[2]), dtype=np.float32)
+
+
+    # --- PASSE 2 : EXECUTION DU RESAMPLING ---
+    for fi, meta in groups_metadata.items():
+        indexes = meta['indexes']
+        real_len = meta['real_len']
+
+        if real_len == 0: continue
+
+        # 1. Extraction propre
+        batch_trimmed = tracings[indexes, :real_len, :]
+
+        # 2. Resampling
         gcd = np.gcd(int(fo), int(fi))
         up = int(fo // gcd)
         down = int(fi // gcd)
 
-        # Calcul du resampling
-        resampled_batch = signal.resample_poly(batch, up, down, axis=1)
+        resampled_batch = signal.resample_poly(batch_trimmed, up, down, axis=1)
 
+        # 3. Placement
+        # On colle le résultat dans le grand tableau
+        # Comme new_tracings est rempli de 0, le padding se fait tout seul
         current_len = resampled_batch.shape[1]
-        limit = min(new_len, current_len)
-        
+    
+        # Petit clip de sécurité (au cas où ceil/resample_poly diffèrent de 1 pixel)
+        limit = min(max_required_len, current_len)
+
         new_tracings[indexes, :limit, :] = resampled_batch[:, :limit, :]
 
     return new_tracings
-
 
 
 
