@@ -46,8 +46,6 @@ FINAL_CLASSES = [
     "SVPB","TAb","TInv","VPB"
 ]
 
-patient_id = 1 # Global patient ID counter
-
 def parse_hea_file(hea_file):
     """Parse WFDB header file to extract exam_id, age, sex, and Dx codes"""
     hea_file = Path(hea_file)
@@ -124,15 +122,12 @@ def parse_hea_file(hea_file):
         "is_male": is_male,
         "nn_predicted_age": "",
         **labels,
-        "patient_id": patient_id,
         "death": "",
         "timey": "",
         "normal_ecg": "",
         "freq": freq,
         "trace_file": f"{dataset_name}.hdf5"
     }
-
-    patient_id += 1
 
     return dataset_name, row
 
@@ -149,6 +144,7 @@ def run(args):
     rows_per_dataset = {}
 
     with multiprocessing.get_context("spawn").Pool(args.workers) as pool:
+
         for dataset_name, row in tqdm(
             pool.imap(parse_hea_file, hea_files),
             total=len(hea_files),
@@ -156,16 +152,23 @@ def run(args):
         ):
             rows_per_dataset.setdefault(dataset_name, []).append(row)
 
+    global_patient_id = 1
+
     # Generate CSV per dataset
     for dataset_name, rows in rows_per_dataset.items():
         out_csv = output_root / f"{dataset_name}.csv"
+
+        for row in rows:
+            row["patient_id"] = global_patient_id
+            global_patient_id += 1
+
         with open(out_csv, "w", newline="") as f:
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
                     "exam_id", "age", "is_male", "nn_predicted_age",
                     *FINAL_CLASSES,
-                    "patient_id","death","timey","normal_ecg","trace_file"
+                    "patient_id","death","timey","normal_ecg","freq","trace_file"
                 ]
             )
             writer.writeheader()
