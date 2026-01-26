@@ -5,8 +5,6 @@ from tqdm import tqdm
 import multiprocessing
 import time
 
-
-
 SNOMED_TO_CLASS = {
     "164889003": "AF",
     "164890007": "AFL",
