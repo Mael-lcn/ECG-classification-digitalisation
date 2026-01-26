@@ -20,105 +20,102 @@ WRITE_BUFFER_SIZE = 5000
 
 def write_shard_task(task_config):
     """
-    Fonction exécutée par un processus Worker.
-    Elle crée un fichier HDF5 (Shard) et va pêcher les données éparpillées 
-    dans les fichiers sources pour les regrouper ici.
+    Exécute la création d'un fichier HDF5 (Shard) pour un sous-ensemble de données.
+
+    Cette fonction est conçue pour être exécutée par un processus 'Worker' en parallèle.
+    Elle lit les données depuis les fichiers HDF5 sources et les regroupe dans un nouveau
+    fichier HDF5 de destination.
 
     Args:
-        task_config (Dict): Dictionnaire contenant:
-            - 'output_path': Chemin complet du fichier à créer.
-            - 'inventory_df': DataFrame partiel (les lignes à écrire dans ce shard).
+        task_config (dict): Dictionnaire de configuration contenant :
+            - 'output_path' (str) : Chemin complet du fichier HDF5 à créer.
+            - 'inventory_df' (pd.DataFrame) : DataFrame contenant les métadonnées des
+              échantillons à copier (doit inclure 'source_h5_path' et 'h5_idx').
 
     Returns:
-        str: Message de statut pour le logging.
+        str: Un message de statut résumant le nombre d'échantillons écrits ou l'erreur rencontrée.
     """
     shard_path = task_config['output_path']
     inventory_df = task_config['inventory_df'] 
 
-    # Si le dataframe est vide, inutile de créer un fichier
+    # 1. Si pas de données, on arrête.
     if inventory_df.empty:
         return f"Shard {os.path.basename(shard_path)} : Vide (Ignoré)"
 
-    # On regroupe les demandes par fichier source.
-    # Cela permet d'ouvrir 'source_A.h5', de tout lire ce qu'il faut dedans, 
+    # 2. On groupe par fichier source pour ne l'ouvrir qu'une seule fois
     grouped_sources = inventory_df.groupby('source_h5_path')
 
     total_written = 0
     f_out = None
 
     try:
-        # Ouverture du fichier de destination en écriture
+        # Création du fichier de destination (Mode 'w' = overwrite)
         f_out = h5py.File(shard_path, 'w')
 
-        # On ne connaît pas encore la dimension temporelle D.
         dset_tracings = None 
-        dset_ids = None
+        dset_ids = None 
 
-        # Le type pour les chaînes de caractères (IDs) en HDF5
-        dt_str = h5py.string_dtype(encoding='utf-8')
-
+        # Buffers pour stocker les données en RAM avant écriture disque
         buffer_tracings = []
         buffer_ids = []
 
-        # --- BOUCLE PRINCIPALE DE LECTURE ---
+        # Boucle sur chaque fichier source
         for source_path, sub_df in grouped_sources:
-            # On récupère les indices HDF5 (ligne i) qu'on doit copier
+            # Récupération des indices (lignes) à copier depuis ce fichier
             indices_to_grab = sorted(sub_df['h5_idx'].values)
             if not indices_to_grab: 
                 continue
 
             try:
-                with h5py.File(source_path, 'r') as f_in:
-                    
-                    # 1. détection de dimmension
-                    if dset_tracings is None:
-                        # On inspecte le premier fichier source valide
-                        source_shape = f_in['tracings'].shape
-                        D = source_shape[1]
-                        
-                        # Création des datasets extensibles
-                        # chunks=(128, D, nb_leads) : Optimise la lecture future par batch de 128
-                        dset_tracings = f_out.create_dataset('tracings', 
-                                           shape=(0, D, 12), 
-                                           maxshape=(None, D, 12), 
-                                           dtype='f4', # Float32 pour Deep Learning
-                                           chunks=(128, D, 12)) 
+                abs_source_path = os.path.abspath(source_path)
 
+                with h5py.File(abs_source_path, 'r') as f_in:
+                    if dset_tracings is None:
+                        # 1. Détection de la dimension temporelle (ex: 4096 points)
+                        source_shape = f_in['tracings'].shape
+                        time_dim = source_shape[1]
+                        source_id_dtype = f_in['exam_id'].dtype
+
+                        # 3. Création des datasets extensibles
+                        # 'tracings' : Float32 (standard pour le Deep Learning)
+                        dset_tracings = f_out.create_dataset('tracings', 
+                                           shape=(0, time_dim, 12), 
+                                           maxshape=(None, time_dim, 12), 
+                                           dtype='f4',
+                                           chunks=(128, time_dim, 12)) 
+
+                        # 'exam_id' : On utilise le type détecté (source_id_dtype)
                         dset_ids = f_out.create_dataset('exam_id', 
                                            shape=(0,), 
                                            maxshape=(None,), 
-                                           dtype=dt_str)
+                                           dtype=source_id_dtype)
 
+                    # Lecture directe via slicing numpy/h5py
                     data_tracings = f_in['tracings'][indices_to_grab]
                     data_ids = f_in['exam_id'][indices_to_grab]
 
-                    # Décodage des bytes (b'ID123') en string ('ID123') si nécessaire
-                    if data_ids.dtype.kind == 'S': 
-                        data_ids = [x.decode('utf-8') for x in data_ids]
-
-                    # Ajout au buffer RAM
+                    # Ajout aux buffers temporaires
                     buffer_tracings.append(data_tracings)
                     buffer_ids.append(data_ids)
   
-                    # 3. Flush
-                    # On vide le buffer si il est plein pour libérer la RAM
+                    # Si la mémoire tampon est pleine, on vide sur le disque
                     current_buffer_len = sum(len(b) for b in buffer_tracings)
                     if dset_tracings is not None and current_buffer_len >= WRITE_BUFFER_SIZE:
                         flush_buffer(dset_tracings, dset_ids, buffer_tracings, buffer_ids)
-                        # Reset des buffers
+                        # Réinitialisation des buffers
                         buffer_tracings, buffer_ids = [], []
 
             except Exception as e:
-                # On log l'erreur mais on ne crash pas tout le process pour un fichier corrompu
-                print(f"[Worker Error] Impossible de lire {source_path}: {e}")
+                # En cas d'erreur sur un fichier source, on log mais on ne crashe pas tout le process
+                print(f"[Worker Warning] Impossible de lire {source_path}: {e}")
                 continue
 
-        # On écrit ce qu'il reste dans les buffers à la fin du traitement
+        # On écrit les données restantes dans les buffers
         if buffer_tracings and dset_tracings is not None:
             flush_buffer(dset_tracings, dset_ids, buffer_tracings, buffer_ids)
             total_written = dset_tracings.shape[0]
 
-        # Sauvegarde du CSV compagnon (Méta-données alignées)
+        # Sauvegarde du CSV compagnon (Méta-données alignées avec le HDF5 généré)
         csv_out_path = shard_path.replace('.hdf5', '.csv')
         inventory_df.to_csv(csv_out_path, index=False)
 
@@ -126,10 +123,10 @@ def write_shard_task(task_config):
         return f"CRITICAL ERROR sur {shard_path}: {global_e}"
 
     finally:
-        # Sécurité : On s'assure que le fichier est fermé quoi qu'il arrive
+        # Sécurité : On ferme toujours le fichier proprement
         if f_out:
             f_out.close()
-    
+
     return f"Shard {os.path.basename(shard_path)} : {total_written} samples générés."
 
 
@@ -287,19 +284,19 @@ def main():
         description="Outil de Shuffling et Sharding Offline pour Datasets HDF5 Massifs."
     )
 
-    parser.add_argument('-i', '--input', type=str, required=True, 
+    parser.add_argument('-i', '--input', type=str, default='../../../data/15_prct/',
                         help='Dossier source contenant les paires .hdf5 et .csv')
 
-    parser.add_argument('-o', '--output', type=str, required=True, 
+    parser.add_argument('-o', '--output', type=str, default='../output/final_data/',
                         help='Dossier destination où seront créés les nouveaux fichiers')
 
-    parser.add_argument('-s', '--shard_size', type=int, default=10000, 
+    parser.add_argument('-s', '--shard_size', type=int, default=10000,
                         help='Nombre cible d\'échantillons par fichier de sortie (Défaut: 10k)')
 
     parser.add_argument('--train_prct', type=float, default=0.80, help='Ratio Train (0-1)')
     parser.add_argument('--val_prct', type=float, default=0.10, help='Ratio Validation (0-1)')
     
-    parser.add_argument('-w', '--workers', type=int, default=os.cpu_count()-1, 
+    parser.add_argument('-w', '--workers', type=int, default=os.cpu_count()-1,
                         help='Nombre de processus parallèles (Défaut: CPU-1)')
 
     args = parser.parse_args()

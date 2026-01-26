@@ -5,6 +5,8 @@ from tqdm import tqdm
 import multiprocessing
 import time
 
+
+
 SNOMED_TO_CLASS = {
     "164889003": "AF",
     "164890007": "AFL",
@@ -179,11 +181,12 @@ def run(args):
     seconds = int(elapsed % 60)
     print(f"Completed in {minutes} minutes and {seconds} seconds")
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", type=str, default="../../data/physioNet")
-    parser.add_argument("-o", "--output", type=str, default="../output/csv/")
-    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count() - 1)
+    parser.add_argument("-o", "--output", type=str, default="../output/dataset1/")
+    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
     args = parser.parse_args()
 
     run(args)
