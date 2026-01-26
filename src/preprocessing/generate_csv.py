@@ -46,6 +46,8 @@ FINAL_CLASSES = [
     "SVPB","TAb","TInv","VPB"
 ]
 
+patient_id = 1 # Global patient ID counter
+
 def parse_hea_file(hea_file):
     """Parse WFDB header file to extract exam_id, age, sex, and Dx codes"""
     hea_file = Path(hea_file)
@@ -55,10 +57,23 @@ def parse_hea_file(hea_file):
     age = None
     is_male = None
     dx_codes = []
+    freq = None
 
     with open(hea_file, "r") as f:
         for line in f:
             line = line.strip()
+
+            # --- FIRST LINE: sampling frequency ---
+            if freq is None and not line.startswith("#"):
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        freq = float(parts[2])
+                    except:
+                        freq = None
+                continue
+
+            # --- METADATA LINES ---
             if line.startswith("# Age:"):
                 try:
                     age = float(line.split(":")[1].strip())
@@ -109,12 +124,15 @@ def parse_hea_file(hea_file):
         "is_male": is_male,
         "nn_predicted_age": "",
         **labels,
-        "patient_id": "",
+        "patient_id": patient_id,
         "death": "",
         "timey": "",
         "normal_ecg": "",
+        "freq": freq,
         "trace_file": f"{dataset_name}.hdf5"
     }
+
+    patient_id += 1
 
     return dataset_name, row
 
