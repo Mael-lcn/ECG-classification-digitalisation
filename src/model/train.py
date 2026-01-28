@@ -271,7 +271,7 @@ def run(args):
             history = json.load(f)
     else:
         history = {'epoch': [], 'train_loss': [], 'val_loss': []}
-        
+
     best_val_loss = float('inf')
     valid_losses = [v for v in history.get('val_loss', []) if v > 0]
     if valid_losses:
@@ -304,7 +304,7 @@ def run(args):
             for f in glob.glob(os.path.join(args.checkpoint_dir, "best_model_*.pt")):
                 try: os.remove(f)
                 except: pass
-            
+
             save_path = os.path.join(args.checkpoint_dir, f"best_model_ep{epoch}_loss{val_loss:.4f}.pt")
             torch.save(model.state_dict(), save_path)
             print(f"    *** NEW RECORD! Sauvegardé : {os.path.basename(save_path)} ***")

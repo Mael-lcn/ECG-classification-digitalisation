@@ -8,7 +8,7 @@ from scipy import signal
 
 
 """
-    IO PART
+    I/O PART
 """
 def collect_files(input_dir):
     """
