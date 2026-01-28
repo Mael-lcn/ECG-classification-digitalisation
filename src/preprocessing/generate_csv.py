@@ -125,7 +125,7 @@ def parse_hea_file(hea_file):
         "death": "",
         "timey": "",
         "normal_ecg": "",
-        "freq": freq,
+        "frequences": freq,
         "trace_file": f"{dataset_name}.hdf5"
     }
 
@@ -168,7 +168,7 @@ def run(args):
                 fieldnames=[
                     "exam_id", "age", "is_male", "nn_predicted_age",
                     *FINAL_CLASSES,
-                    "patient_id","death","timey","normal_ecg","freq","trace_file"
+                    "patient_id","death","timey","normal_ecg","frequences","trace_file"
                 ]
             )
             writer.writeheader()
