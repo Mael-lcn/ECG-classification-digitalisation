@@ -30,11 +30,13 @@ def collect_files(input_dir):
     return patch_dict
 
 
-def load(path):
+def load(path, use_csv=True):
     path_hd, path_csv = path
+    csv_data = None
 
     # 1. Charger le CSV
-    csv_data = pd.read_csv(path_csv)
+    if use_csv:
+        csv_data = pd.read_csv(path_csv)
 
     # 2. Charger le contenu du HDF5 dans un dictionnaire
     h5_content = {}
@@ -82,7 +84,7 @@ def re_sampling(data, csv, fo=400):
     }
 
     # Regroupement par fréquence
-    freq_to_id = csv.groupby('frequences')['id'].apply(list).to_dict()
+    freq_to_id = csv.groupby('freq')['exam_id'].apply(list).to_dict()
 
     # --- PASSE 1 : CALCUL DE LA TAILLE MAXIMALE REQUISE ---
     max_required_len = 0

@@ -23,7 +23,7 @@ def worker1(couple, output):
     time_serries_norm = re_sampling(dataset, csv)
     dataset['tracings'] = time_serries_norm
 
-    z_norm(dataset['tracings'], csv)
+    z_norm(dataset['tracings'])
 
     write_results(dataset, name, output)
 
@@ -36,8 +36,8 @@ def worker2(couple, output):
     """
     name, path = couple
 
-    dataset, csv = load(path)
-    dataset_norm = z_norm(dataset, csv)
+    dataset, _ = load(path, use_csv=False)
+    dataset_norm = z_norm(dataset)
 
     write_results(dataset_norm, name, output)
 
@@ -46,6 +46,8 @@ def worker2(couple, output):
 def run(args):
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
+
+    print("Récolte des données")
 
     patch_dict1 = collect_files(args.dataset1)
 
@@ -57,6 +59,9 @@ def run(args):
     patch_items1 = list(patch_dict1.items())
     pool_worker = partial(worker1, output=args.output)
 
+    print("Début de la normalisation du dataset1 vers le model du dataset2")
+
+
     # ---- Partie 1 uniquement sur dataset 1 -----------
     # normalise le dataset 1 pour qu'il correspondent au dataset 2
     with multiprocessing.get_context('spawn').Pool(args.workers) as pool:
@@ -65,6 +70,8 @@ def run(args):
                                         desc='Preprocessing'):
             pass
 
+
+    print("Normalisation du dataset2")
 
     # ---- Partie 2 sur dataset 1 & 2 ! -----------
     # Normalisation des serie temporelle
@@ -95,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-d1', '--dataset1', type=str, default='../output/dataset1/')
     parser.add_argument('-d2', '--dataset2', type=str, default='../../../data/15_prct/')
-    parser.add_argument('-o', '--output', type=str, default='../output/data')
+    parser.add_argument('-o', '--output', type=str, default='../output/normalize_data')
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
 
     args = parser.parse_args()
