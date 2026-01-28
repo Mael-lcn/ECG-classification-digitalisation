@@ -11,6 +11,21 @@ from scipy import signal
     IO PART
 """
 def collect_files(input_dir):
+    """
+    Parcourt un répertoire pour associer les fichiers HDF5 à leurs fichiers CSV correspondants.
+
+    Cette fonction recherche tous les fichiers `.hdf5` dans le dossier spécifié.
+    Pour chaque fichier trouvé, elle déduit le chemin du fichier `.csv` associé 
+    (même nom, même dossier). Si le CSV existe, la paire est ajoutée au résultat.
+
+    Args:
+        input_dir (str): Le chemin du répertoire contenant les fichiers à traiter.
+
+    Returns:
+        dict: Un dictionnaire structuré comme suit :
+            - Clé (str) : Le nom du fichier HDF5 (ex: 'sample.hdf5').
+            - Valeur (tuple) : Un tuple contenant (chemin_absolu_hdf5, chemin_absolu_csv).
+    """
     patch_dict = {}
 
     # Récupère les files à traiter
@@ -31,6 +46,25 @@ def collect_files(input_dir):
 
 
 def load(path, use_csv=True):
+    """
+    Charge les données depuis un fichier HDF5 et, optionnellement, depuis un CSV associé.
+
+    Cette fonction ouvre le fichier HDF5 en lecture seule et extrait tous les datasets
+    situés à la racine pour les stocker dans un dictionnaire Python.
+    Elle gère également le chargement du fichier CSV associé via pandas si demandé.
+
+    Args:
+        path (tuple): Un tuple de deux chaînes de caractères (chemin_hdf5, chemin_csv).
+        use_csv (bool, optional): Indique s'il faut charger le fichier CSV. 
+                                  Par défaut à True.
+
+    Returns:
+        tuple: Un couple contenant :
+            - h5_content (dict): Un dictionnaire où les clés sont les noms des datasets 
+              HDF5 et les valeurs sont les données sous forme de tableaux NumPy.
+            - csv_data (pd.DataFrame ou None): Le contenu du CSV sous forme de DataFrame,
+              ou None si use_csv est False.
+    """
     path_hd, path_csv = path
     csv_data = None
 
@@ -44,13 +78,27 @@ def load(path, use_csv=True):
     with h5py.File(path_hd, 'r') as f:
         # On boucle sur toutes les clés disponibles à la racine du fichier
         for key in f.keys():
-            # On charge les données en mémoire (RAM) immédiatement
+            # On charge les données en mémoire immédiatement
             h5_content[key] = f[key][:]
 
     return h5_content, csv_data
 
 
 def write_results(data_dict, name, output_dir):
+    """
+    Sauvegarde le contenu d'un dictionnaire dans un fichier HDF5.
+
+    Cette fonction crée un nouveau fichier HDF5 dans le répertoire spécifié.
+    Chaque entrée du dictionnaire est enregistrée comme un 'dataset' distinct
+    à la racine du fichier.
+
+    Args:
+        data_dict (dict): Dictionnaire contenant les données.
+                          - Clés (str) : Noms des datasets HDF5.
+                          - Valeurs (array-like) : Données (numpy arrays, listes) à stocker.
+        name (str): Le nom du fichier de sortie (ex: 'resultat.hdf5').
+        output_dir (str): Le chemin du répertoire de destination.
+    """
     file_path = os.path.join(output_dir, name)
 
     with h5py.File(file_path, 'w') as f:
@@ -73,6 +121,17 @@ def re_sampling(data, csv, fo=400):
 
     On ne peut pas deviner la taille du tableau final sans regarder la longueur 'utile'
     de chaque signal avant de commencer.
+
+    Args:
+        data (dict): Contient les données brutes. Doit avoir les clés :
+            - 'tracings' (np.ndarray) : Tensor de forme (N_exams, T_samples, 12_channels).
+            - 'exam_id' (list/array) : Identifiants correspondants aux tracés.
+        csv (pd.DataFrame): Métadonnées contenant au moins les colonnes 'exam_id' et 'freq'.
+        fo (int, optional): Fréquence d'échantillonnage cible en Hz. Par défaut 400.
+
+    Returns:
+        np.ndarray: Un nouveau tenseur de forme (N, T_new, 12) contenant les signaux
+                    rééchantillonnés, alignés et padés si nécessaire.
     """
     tracings = data['tracings'] # Shape (N, Total_Buffer_Len, Channels)
     all_ids = data['exam_id']
@@ -84,9 +143,9 @@ def re_sampling(data, csv, fo=400):
     }
 
     # Regroupement par fréquence
-    freq_to_id = csv.groupby('freq')['exam_id'].apply(list).to_dict()
+    freq_to_id = csv.groupby('frequences')['exam_id'].apply(list).to_dict()
 
-    # --- PASSE 1 : CALCUL DE LA TAILLE MAXIMALE REQUISE ---
+    # Passe 1 : calcul de la taille maximal d'un signal
     max_required_len = 0
 
     # On stocke les infos de découpe pour ne pas les recalculer à la passe 2
@@ -102,7 +161,6 @@ def re_sampling(data, csv, fo=400):
         # Détection de la longueur utile (On admet que les 0 de padding sont à la fin)
         # On cherche la dernière colonne qui n'est pas vide
         # (N, T, C) -> On écrase N (0) et C (2) pour ne garder que le profil Temporel (T,)
-        # Cela produit un vecteur 1D directement : [0.0, 0.5, 0.8, ... 0.0, 0.0]
         time_profile = np.max(np.abs(batch), axis=(0, 2))
 
         active_indices = np.flatnonzero(time_profile > 1e-6)
@@ -139,14 +197,14 @@ def re_sampling(data, csv, fo=400):
     new_tracings = np.zeros((tracings.shape[0], max_required_len, tracings.shape[2]), dtype=np.float32)
 
 
-    # --- PASSE 2 : EXECUTION DU RESAMPLING ---
+    # Passe 2 : resampling
     for fi, meta in groups_metadata.items():
         indexes = meta['indexes']
         real_len = meta['real_len']
 
         if real_len == 0: continue
 
-        # 1. Extraction propre
+        # 1. Extraction
         batch_trimmed = tracings[indexes, :real_len, :]
 
         # 2. Resampling
@@ -160,7 +218,7 @@ def re_sampling(data, csv, fo=400):
         # On colle le résultat dans le grand tableau
         # Comme new_tracings est rempli de 0, le padding se fait tout seul
         current_len = resampled_batch.shape[1]
-    
+
         # Petit clip de sécurité (au cas où ceil/resample_poly diffèrent de 1 pixel)
         limit = min(max_required_len, current_len)
 
@@ -176,7 +234,7 @@ def re_sampling(data, csv, fo=400):
 def z_norm(tracings):
     """
     Normalisation vectorisée sans aucune boucle Python.
-    
+
     1. Calcule Starts/Ends pour tout le monde (N, C).
     2. Construit un masque 3D (N, T, C) via broadcasting.
     3. Utilise des NaNs pour ignorer les zones hors du signal.

@@ -2,7 +2,6 @@ import os
 import argparse
 import time
 from tqdm import tqdm
-import shutil
 
 from functools import partial
 import multiprocessing
@@ -13,9 +12,14 @@ from aux import *
 
 def worker1(couple, output):
     """
-    Docstring for worker
+    Orchestre la pipeline du traitement pour un hdf5 : 
+    Chargement -> Rééchantillonnage (avec CSV) -> Normalisation -> Sauvegarde.
 
-    :param couple: 1er element nom du file, le second est le path 
+    Args:
+        couple (tuple): Un tuple (filename, (path_h5, path_csv)).
+                        - filename (str): Le nom du fichier de sortie (ex: 'patient_01.hdf5').
+                        - (path_h5, path_csv) : Les chemins complets vers les fichiers sources.
+        output (str): Le chemin du répertoire où sauvegarder le fichier HDF5 traité.
     """
     name, path = couple
 
@@ -30,20 +34,41 @@ def worker1(couple, output):
 
 def worker2(couple, output):
     """
-    Docstring for worker
+    Orchestre une pipeline simplifié : Chargement -> Normalisation -> Sauvegarde.
 
-    :param couple: 1er element nom du file, le second est le path 
+    Ce worker ignore l'étape de rééchantillonnage et le fichier CSV.
+    Il est utile si les données sont déjà à la bonne fréquence ou si le CSV est absent.
+
+    Args:
+        couple (tuple): Un tuple (filename, (path_h5, path_csv)).
+        output (str): Le chemin du répertoire de sortie.
     """
     name, path = couple
 
     dataset, _ = load(path, use_csv=False)
-    dataset_norm = z_norm(dataset)
+    dataset_norm = z_norm(dataset['tracings'])
 
     write_results(dataset_norm, name, output)
 
 
 
 def run(args):
+    """
+    Fonction principale d'orchestration de la pipeline de prétraitement.
+
+    Elle gère le flux de travail en deux étapes distinctes :
+    1. Traitement du Dataset 1 : Resampling + Normalisation (via worker1).
+    2. Traitement du Dataset 2 : Normalisation simple (via worker2).
+
+    Elle utilise le multiprocessing pour paralléliser les tâches sur les fichiers.
+
+    Args:
+        args (argparse.Namespace): Les arguments de la ligne de commande contenant :
+            - args.dataset1 : Chemin source Dataset 1.
+            - args.dataset2 : Chemin source Dataset 2.
+            - args.output : Dossier de sortie.
+            - args.workers : Nombre de processus parallèles.
+    """
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
 
@@ -73,8 +98,8 @@ def run(args):
 
     print("Normalisation du dataset2")
 
-    # ---- Partie 2 sur dataset 1 & 2 ! -----------
-    # Normalisation des serie temporelle
+
+    # ---- Partie 2 uniquement sur dataset 2 -----------
     patch_dict = collect_files(args.dataset2)
 
     # Vérifie que des données ont été récoltés
@@ -98,7 +123,12 @@ def run(args):
     print(f"Completed in {minutes} minutes and {seconds} seconds")
 
 
+
 def main():
+    """
+    Point d'entrée du script. 
+    Parse les arguments de la ligne de commande et lance la fonction run.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument('-d1', '--dataset1', type=str, default='../output/dataset1/')
     parser.add_argument('-d2', '--dataset2', type=str, default='../../../data/15_prct/')

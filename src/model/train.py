@@ -26,7 +26,13 @@ plt.switch_backend('agg')
 
 
 def save_monitoring(history, checkpoint_dir):
-    """ Sauvegarde l'historique en JSON et trace les courbes. """
+    """ 
+        Sauvegarde les métriques d'entraînement et génère un graphique de convergence.
+        
+        Args:
+            history (dict): Dictionnaire contenant 'epoch', 'train_loss', 'val_loss'.
+            checkpoint_dir (str): Dossier de sortie.
+        """
     json_path = os.path.join(checkpoint_dir, "training_history.json")
     with open(json_path, 'w') as f:
         json.dump(history, f, indent=4)
@@ -55,6 +61,26 @@ def save_monitoring(history, checkpoint_dir):
 
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
+    """
+    Exécute une itération complète d'entraînement sur le dataset (une époque).
+
+    Gère le passage avant (forward), le calcul de la loss, la rétropropagation (backward)
+    et la mise à jour des poids. Intègre la gestion de la précision mixte (AMP).
+
+    Args:
+        model (nn.Module): Le modèle à entraîner.
+        dataloader (DataLoader): Le chargeur de données d'entraînement.
+        optimizer (Optimizer): L'optimiseur (ex: AdamW).
+        criterion (nn.Module): La fonction de coût (ex: BCEWithLogitsLoss).
+        scaler (torch.amp.GradScaler | None): Scaler pour la gestion des gradients en FP16 (si AMP activé).
+        device (torch.device): CPU, CUDA ou MPS.
+        epoch (int): Numéro de l'époque courante (pour l'affichage).
+        total_epochs (int): Nombre total d'époques prévues.
+        use_amp (bool): Si True, active le contexte d'autocast.
+
+    Returns:
+        float: La perte (loss) moyenne sur l'ensemble de l'époque.
+    """
     model.train()
     loop = tqdm(dataloader, desc=f"Ep {epoch}/{total_epochs} [TRAIN]")
     total_loss = 0
@@ -88,6 +114,22 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 
 
 def validate(model, dataloader, criterion, device, use_amp):
+    """
+    Évalue le modèle sur le jeu de validation.
+
+    Désactive le calcul des gradients (torch.no_grad) et passe le modèle en mode évaluation
+    (fige le Dropout et la BatchNorm).
+
+    Args:
+        model (nn.Module): Le modèle à évaluer.
+        dataloader (DataLoader): Le chargeur de données de validation.
+        criterion (nn.Module): La fonction de coût.
+        device (torch.device): CPU, CUDA ou MPS.
+        use_amp (bool): Si True, utilise l'autocast pour l'inférence (gain de vitesse).
+
+    Returns:
+        float: La perte (loss) moyenne sur le jeu de validation.
+    """
     model.eval()
     loop = tqdm(dataloader, desc="[VAL]")
     total_loss = 0
@@ -111,7 +153,35 @@ def validate(model, dataloader, criterion, device, use_amp):
 
 
 def run(args):
-        # 1. Chargement de la liste des classes
+    """
+    Pilote l'intégralité du pipeline d'entraînement : configuration, chargement, boucle d'époques et sauvegarde.
+
+    Cette fonction orchestre les étapes suivantes :
+    1.  Configuration : Détecte le matériel (CPU/CUDA/MPS) et configure le Mixed Precision (AMP).
+    2.  Données : Instancie les Datasets (Train/Val) et les DataLoaders optimisés.
+    3.  Modèle : Initialise le modèle et charge les poids existants si une reprise est demandée (`resume_from`).
+    4.  Boucle d'entraînement :
+        - Exécute les époques d'entraînement et de validation.
+        - Gère l'historique des pertes (Loss).
+        - Applique l'Early Stopping si la validation stagne.
+        - Sauvegarde le meilleur modèle (`best_model_*.pt`) et les checkpoints réguliers.
+
+    Args:
+        args (argparse.Namespace): Objet contenant les hyperparamètres et configurations :
+            - args.class_map (str) : Chemin du JSON des classes cibles.
+            - args.train_data (str) : Chemin du dataset d'entraînement.
+            - args.val_data (str) : Chemin du dataset de validation.
+            - args.checkpoint_dir (str) : Dossier de sortie.
+            - args.resume_from (str, optional) : Chemin d'un checkpoint pour reprise.
+            - args.batch_size (int) : Taille du batch.
+            - args.lr (float) : Learning rate.
+            - args.epochs (int) : Nombre max d'époques.
+            - args.patience (int) : Seuil de patience pour l'Early Stopping.
+
+    Returns:
+        None: La fonction écrit les logs et les fichiers modèles sur le disque.
+    """
+    # 1. Chargement de la liste des classes
     print(f"[INIT] Chargement des classes depuis : {args.class_map}")
     with open(args.class_map, 'r') as f:
         loaded_classes = json.load(f)
@@ -147,7 +217,7 @@ def run(args):
     train_loader = DataLoader(
         dataset=train_ds,
         batch_size=args.batch_size,
-        shuffle=True, 
+        shuffle=False, 
         num_workers=args.workers,
         pin_memory=True,
         persistent_workers=True,

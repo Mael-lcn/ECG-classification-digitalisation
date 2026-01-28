@@ -22,7 +22,6 @@ def write_shard_task(task_config):
     """
     Exécute la création d'un fichier HDF5 (Shard) pour un sous-ensemble de données.
 
-    Cette fonction est conçue pour être exécutée par un processus 'Worker' en parallèle.
     Elle lit les données depuis les fichiers HDF5 sources et les regroupe dans un nouveau
     fichier HDF5 de destination.
 

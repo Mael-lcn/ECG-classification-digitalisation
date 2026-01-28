@@ -10,11 +10,32 @@ import numpy as np
 
 
 class LargeH5Dataset(Dataset):
+    """
+    Dataset PyTorch conçu pour gérer de très gros volumes de données ECG fragmentés 
+    en plusieurs fichiers HDF5 et CSV.
+
+    Stratégie :
+    - Les données ne sont pas chargées en RAM à l'initialisation.
+    - Seule la structure (taille de chaque fichier) est scannée au début.
+    - Les fichiers sont ouverts/fermés dynamiquement pendant l'entraînement (`__getitem__`).
+    - Gère l'alignement des colonnes de labels pour garantir que l'ordre des classes 
+      correspond exactement à la sortie du modèle.
+
+    Attributes:
+        classes (list): Liste des noms de classes cibles (ordre fixe).
+        h5_paths (list): Liste des chemins vers les fichiers .hdf5 triés.
+        csv_paths (list): Liste des chemins vers les fichiers .csv triés.
+        cumulative_sizes (list): Liste des index cumulés pour mapper un index global vers un fichier spécifique.
+        total_length (int): Nombre total d'échantillons dans tout le dataset.
+    """
     def __init__(self, input_dir, classes_list):
         """
+        Initialise le dataset en scannant le répertoire.
+
         Args:
-            input_dir: Dossier contenant les .h5 et .csv
-            classes_list: La liste FINAL_CLASSES (l'ordre est crucial)
+            input_dir (str): Chemin du dossier contenant les paires de fichiers .hdf5 et .csv.
+            classes_list (list): La liste ordonnée des classes (FINAL_CLASSES). 
+                                 Crucial pour que le vecteur One-Hot/Multi-hot soit cohérent.
         """
         self.classes = classes_list
         self.num_classes = len(classes_list)
@@ -47,10 +68,22 @@ class LargeH5Dataset(Dataset):
 
 
     def __len__(self):
+        """Retourne la taille totale du dataset (tous fichiers confondus)."""
         return self.total_length
 
 
     def __getitem__(self, idx):
+        """
+        Récupère un échantillon (Tracé + Label) à partir d'un index global.
+
+        Args:
+            idx (int): Index global de l'échantillon (entre 0 et total_length - 1).
+
+        Returns:
+            tuple: (tracing_tensor, label_tensor)
+                   - tracing_tensor : Tensor (Channels=12, Time)
+                   - label_tensor : Tensor (Num_Classes,)
+        """
         # 1. Trouver le fichier
         file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
 
@@ -106,6 +139,10 @@ class LargeH5Dataset(Dataset):
 
 
     def __del__(self):
+        """
+        Destructeur de la classe.
+        S'assure que le fichier HDF5 est bien fermé quand l'objet Dataset est détruit.
+        """
         if self.file_handle is not None:
             try:
                 self.file_handle.close()
