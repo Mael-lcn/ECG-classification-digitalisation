@@ -317,6 +317,7 @@ def main():
     # Model
     model = CNN(num_classes=len(class_list)).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    torch.compile(model)
 
     print('Evaluating model...')
     # Evaluate
