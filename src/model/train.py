@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import sys
+import multiprocessing
 
 from torch.utils.data import DataLoader
 
@@ -356,7 +356,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--workers', type=int, default=1)
+    parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count()-2)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--patience', type=int, default=5)
 

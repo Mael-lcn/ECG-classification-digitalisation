@@ -14,8 +14,8 @@ import multiprocessing
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from src.dataset import LargeH5Dataset
-from src.model import CNN
+from dataset import LargeH5Dataset
+from model import CNN
 
 
 # Compute recording-wise accuracy.
@@ -277,13 +277,13 @@ def load_weights(weights_file):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', required=True, help="HDF5 test dataset directory")
-    parser.add_argument('--checkpoint', required=True, help="Trained model checkpoint")
-    parser.add_argument('--class_map', required=True, help="JSON ordered class list")
-    parser.add_argument('--weights', required=True, default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
+    parser.add_argument('--data', default="../output/final_data/test", help="HDF5 test dataset directory")
+    parser.add_argument('--checkpoint', default="checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
+    parser.add_argument('--class_map', default='../../ressources/final_class.json', help="JSON ordered class list")
+    parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--threshold', type=float, default=0.5) # may be optimized later
-    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
+    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-2)
 
     args = parser.parse_args()
 
