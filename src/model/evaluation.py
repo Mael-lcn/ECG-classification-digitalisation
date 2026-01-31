@@ -296,7 +296,7 @@ def main():
     # Load classes
     with open(args.class_map) as f:
         class_list = json.load(f)
-    classes = [set([c]) for c in class_list]
+    classes = class_list
 
     # Load weights
     weight_classes, weights = load_weights(args.weights)
@@ -333,8 +333,8 @@ def main():
     challenge = compute_challenge_metric(
         # uses the specific "Sinus Rhythm" (NSR) baseline to see if the model is actually learning 
         # heart pathologies or just guessing the most common class
-        weights, labels, binary, classes, set(["NSR"]) 
-    )
+        weights, labels, binary, classes, "NSR") 
+
     print('Done.')
 
     print("===== EVALUATION RESULTS =====")
