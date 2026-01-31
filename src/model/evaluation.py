@@ -189,8 +189,8 @@ def evaluate(model, dataloader, device, threshold):
             x = x.to(device)
             y = y.to(device)
 
-            logits = model(x)
-            probs = torch.sigmoid(logits)
+            probs = model(x)
+            #probs = torch.sigmoid(logits) # already applied in the model forward
             binary = (probs >= threshold).int()
 
             all_labels.append(y.cpu())
