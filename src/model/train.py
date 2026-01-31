@@ -12,12 +12,9 @@ import sys
 
 from torch.utils.data import DataLoader
 
-# Gestion des imports relatifs
-project_root = os.path.join(os.path.dirname(__file__), '..')
-sys.path.append(os.path.abspath(project_root))
 
-from src.dataset import LargeH5Dataset 
-from src.model import Cnn 
+from dataset import LargeH5Dataset 
+from model import CNN 
 
 
 
@@ -236,7 +233,8 @@ def run(args):
 
     # 4. Modèle
     print(f"[MODEL] Init du modèle...")
-    model = Cnn(num_classes=num_classes).to(device)
+    model = CNN(num_classes=num_classes).to(device)
+    torch.compile(model)
 
     # 5. Reprise de train
     start_epoch = 1
@@ -264,60 +262,81 @@ def run(args):
     criterion = nn.BCEWithLogitsLoss()
     scaler_amp = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # 7. Historique
+    # 7. Reprise d'entrainement
     history_path = os.path.join(args.checkpoint_dir, "training_history.json")
     if args.resume_from and os.path.exists(history_path):
-        with open(history_path, 'r') as f:
-            history = json.load(f)
+        try:
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+            print("[RESUME] Historique chargé.")
+        except:
+            history = {'epoch': [], 'train_loss': [], 'val_loss': []}
     else:
         history = {'epoch': [], 'train_loss': [], 'val_loss': []}
-
+        
     best_val_loss = float('inf')
-    valid_losses = [v for v in history.get('val_loss', []) if v > 0]
-    if valid_losses:
-        best_val_loss = min(valid_losses)
 
-    # 8. Boucle d'entraînement
-    print(f"\n[TRAIN] Démarrage... (Batch: {args.batch_size})")
+    # Si l'historique existe, on récupère le meilleur val_loss connu pour ne pas le perdre
+    val_losses_clean = [v for v in history.get('val_loss', []) if v > 0]
+    if val_losses_clean:
+        best_val_loss = min(val_losses_clean)
+        print(f"[RESUME] Record Val Loss actuel : {best_val_loss:.4f}")
+
+    print(f"\n[TRAIN] Démarrage Ep {start_epoch} -> {args.epochs}")
+
     stagnation_counter = 0
 
-    for epoch in range(start_epoch, args.epochs + 1):
-        
+    # On commence la boucle à start_epoch
+    for epoch in range(start_epoch, args.epochs+1):
+        # A. Phase d'Apprentissage
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, 
             scaler_amp, device, epoch, args.epochs, use_amp
         )
 
-        val_loss = validate(model, val_loader, criterion, device, use_amp)
-        print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val={val_loss:.4f}")
+        # B. Phase de Validation (Conditionnelle : Seulement > 10)
+        val_loss = None 
 
+        if epoch > 10:
+            val_loss = validate(model, val_loader, criterion, device, use_amp)
+            print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val={val_loss:.4f}")
+        else:
+            print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val=(Skipped)")
+
+        # C. Logs
         history['epoch'].append(epoch)
         history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
+        history['val_loss'].append(val_loss if val_loss is not None else 0.0)
         save_monitoring(history, args.checkpoint_dir)
 
-        # Sauvegarde
-        if val_loss < best_val_loss:
-            stagnation_counter = 0
-            best_val_loss = val_loss
-            
-            for f in glob.glob(os.path.join(args.checkpoint_dir, "best_model_*.pt")):
-                try: os.remove(f)
-                except: pass
+        # D. Checkpointing Intelligent
+        if epoch > 10:
+            # Si on s'améliore
+            if (val_loss < best_val_loss):
+                stagnation_counter = 0
+                best_val_loss = val_loss
 
-            save_path = os.path.join(args.checkpoint_dir, f"best_model_ep{epoch}_loss{val_loss:.4f}.pt")
-            torch.save(model.state_dict(), save_path)
-            print(f"    *** NEW RECORD! Sauvegardé : {os.path.basename(save_path)} ***")
-        else:
-            stagnation_counter += 1
-            print(f"    [PATIENCE] {stagnation_counter}/{args.patience}")
+                # Supprime l'ancien modèle moins bon
+                for f in glob.glob(os.path.join(args.checkpoint_dir, "best_model_*.pt")):
+                    os.remove(f)
 
-        if stagnation_counter >= args.patience:
-            print("[STOP] Early Stopping.")
-            break
+                torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"best_model_ep{epoch}.pt"))
+                print(f"    *** NEW RECORD! best_model.pt sauvegardé (Val: {val_loss:.4f}) ***")
 
-        if epoch % 5 == 0:
-             torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, "last_checkpoint.pt"))
+            # Cas : On ne s'améliore pas
+            else:
+                stagnation_counter += 1
+                print(f"    [PATIENCE] Pas d'amélioration ({stagnation_counter}/{args.patience})")
+
+                # ARRÊT PRÉCOCE
+                if stagnation_counter >= args.patience:
+                    print(f"\n[STOP] Early Stopping déclenché ! Pas de progrès depuis {args.patience} époques.")
+                    print(f"       Meilleur score final : {best_val_loss:.4f}")
+                    break # On sort de la boucle 'for', fin de l'entraînement
+
+        elif epoch % 5 == 0:
+            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"model_ep{epoch}.pt"))
+            print(f"    [BACKUP] model_ep{epoch}.pt sauvegardé.")
 
     print("[FIN] Entraînement terminé.")
 
@@ -326,10 +345,10 @@ def main():
     parser = argparse.ArgumentParser()
 
     # --- Arguments Données ---
-    parser.add_argument('--train_data', type=str, required=True, help="Dossier contenant les shards TRAIN")
-    parser.add_argument('--val_data', type=str, required=True, help="Dossier contenant les shards VAL")
-    
-    parser.add_argument('--class_map', type=str, default='../resources/final_class.json',
+    parser.add_argument('--train_data', type=str, default="../output/final_data/train", help="Dossier contenant les shards TRAIN")
+    parser.add_argument('--val_data', type=str, default="../output/final_data/val", help="Dossier contenant les shards VAL")
+
+    parser.add_argument('--class_map', type=str, default='../../ressources/final_class.json',
                         help="Chemin vers le fichier JSON contenant la liste ordonnée des classes")
 
     # --- Arguments Entraînement ---
@@ -337,7 +356,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--workers', type=int, default=3)
+    parser.add_argument('--workers', type=int, default=1)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--patience', type=int, default=5)
 
