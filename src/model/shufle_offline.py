@@ -12,7 +12,19 @@ from tqdm import tqdm
 
 
 def normalize_id(val):
-    """Normalise les ID (bytes/int -> str) pour garantir le matching."""
+    """
+        Normalise une valeur d'identifiant (bytes, int ou str) en une chaîne de caractères propre.
+
+        Cette méthode gère le décodage des bytes (fréquent avec h5py) et nettoie
+        les espaces superflus pour garantir la cohérence des jointures (merge).
+
+        Args:
+            val (Union[bytes, int, str]): La valeur brute de l'identifiant extraite 
+                du CSV ou du fichier HDF5.
+
+        Returns:
+            str: L'identifiant normalisé en format string UTF-8 sans espaces.
+        """
     if isinstance(val, bytes):
         return val.decode('utf-8')
     return str(val).strip()
@@ -20,15 +32,25 @@ def normalize_id(val):
 
 def scan_sources_and_map_indices(input_dir):
     """
-    Pré-scan global.
-    1. Lit tous les CSV pour avoir les métadonnées patients.
-    2. Lit tous les HDF5 (juste les ID) pour savoir OÙ se trouve chaque exam_id.
-    3. Fusionne les deux pour ne garder que ce qui est complet et aligné.
-    
-    Returns:
-        pd.DataFrame: Un inventaire GLOBAL validé contenant :
-                      [patient_id, exam_id, source_h5_path, h5_idx_src]
-    """
+        Réalise un inventaire global en croisant les métadonnées CSV et les index physiques HDF5.
+
+        1. Lit tous les fichiers CSV du dossier pour obtenir les métadonnées (ex: patient_id).
+        2. Ouvre chaque fichier HDF5 pour mapper chaque `exam_id` à son index numérique (row index).
+        3. Effectue une jointure interne (Inner Join) pour ne conserver que les échantillons
+        présents à la fois dans les métadonnées et dans les données brutes.
+
+        Args:
+            input_dir (str): Chemin du répertoire contenant les paires de fichiers .csv et .hdf5.
+
+        Returns:
+            pd.DataFrame: Un DataFrame "Inventaire" validé contenant les colonnes :
+                - toutes les colonnes des CSV originaux (ex: patient_id, age, label...)
+                - source_h5_path (str): Chemin absolu du fichier HDF5 source.
+                - h5_idx_src (int): L'index de la ligne correspondant à l'exam_id dans le fichier source.
+
+        Raises:
+            ValueError: Si aucun fichier CSV n'est trouvé dans le dossier d'entrée.
+        """
     print("--- 1. Scan des CSV (Métadonnées) ---")
     csv_files = sorted(glob.glob(os.path.join(input_dir, '*.csv')))
     df_list = []
@@ -47,7 +69,7 @@ def scan_sources_and_map_indices(input_dir):
     full_csv = pd.concat(df_list, ignore_index=True)
     # On enlève source_h5_path du CSV, car on va le redéfinir proprement
     full_csv = full_csv.drop(columns=['source_h5_path'])
-        
+
     print(f"-> {len(full_csv)} entrées trouvées dans les CSV.")
 
     print("\n--- 2. Scan des HDF5 (Indexation réelle) ---")
@@ -65,7 +87,7 @@ def scan_sources_and_map_indices(input_dir):
                 for idx, raw_val in enumerate(raw_ids):
                     map_records.append({
                         'exam_id': normalize_id(raw_val),
-                        'source_h5_path': h5_path, # Chemin absolu ou relatif
+                        'source_h5_path': h5_path, # Chemin absolu
                         'h5_idx_src': idx          # L'index integer pour h5py
                     })
         except Exception as e:
@@ -89,8 +111,26 @@ def scan_sources_and_map_indices(input_dir):
 
 def write_shard_task(task_config):
     """
-    Worker simplifié et sécurisé.
-    Il n'a plus besoin de chercher les ID. Il utilise 'h5_idx_src' fourni par le parent.
+    Fonction Worker exécutée par un processus enfant pour générer un unique 'shard' (fichier HDF5 + CSV).
+
+    1. Elle reçoit un sous-ensemble du DataFrame global (l'inventaire).
+    2. Elle groupe les requêtes par fichier source HDF5 pour minimiser les ouvertures/fermetures de fichiers.
+    3. Elle lit les données (tracings) et les IDs de manière vectorisée.
+    4. Elle écrit le nouveau fichier HDF5 et le CSV associé.
+
+    Args:
+        task_config (dict): Un dictionnaire de configuration contenant :
+            - 'output_path' (str): Le chemin complet du fichier HDF5 à créer.
+            - 'inventory_df' (pd.DataFrame): Le sous-ensemble du DataFrame contenant 
+              la liste des examens à écrire dans ce shard, incluant la colonne 'h5_idx_src'.
+
+    Returns:
+        str: Un message de statut indiquant le succès ("OK: ...") ou l'échec ("CRASH: ...").
+             En cas de succès, inclut le nombre d'échantillons écrits.
+    
+    Raises:
+        AssertionError: Si une incohérence est détectée entre la taille des données lues
+        et la taille des métadonnées attendues avant l'écriture.
     """
     shard_path = task_config['output_path']
     # Le DataFrame reçu contient déjà 'source_h5_path' et 'h5_idx_src' corrects.
@@ -150,7 +190,6 @@ def write_shard_task(task_config):
             # Si un fichier source plante, on note les indices locaux échoués
             failed_idx = group['shard_local_idx'].values
             failed_indices.extend(failed_idx)
-            # Dans un worker, mieux vaut ne pas print, mais retourner l'info
 
     # --- Filtrage post-lecture (si échecs I/O) ---
     valid_mask = np.ones(total_samples, dtype=bool)
@@ -200,7 +239,6 @@ def write_shard_task(task_config):
         # 2.  Nettoyage colonnes techniques
         if 'split' in final_df.columns:
             final_df = final_df.drop(columns=['split'])
-
         cols_drop = ['shard_local_idx', 'h5_idx_src']
         final_df = final_df.drop(columns=[c for c in cols_drop if c in final_df.columns])
 
@@ -214,11 +252,32 @@ def write_shard_task(task_config):
 
 
 def run(args):
+    """
+    Orchestre la pipeline complete de préparation des données.
+
+    1. Scan & Map : Appelle `scan_sources_and_map_indices` pour indexer les données.
+    2. Split Patient-Aware : Divise les données en Train/Val/Test en s'assurant
+       qu'un même patient ne se retrouve pas dans plusieurs splits (fuite de données).
+    3. Sharding : Découpe les données de chaque split en blocs de taille fixe (`shard_size`).
+    4. Multiprocessing : Lance un pool de workers pour écrire les fichiers physiques en parallèle.
+
+    Args:
+        args (argparse.Namespace): Les arguments de la ligne de commande parsés, contenant :
+            - args.input (str): Dossier source.
+            - args.output (str): Dossier de destination.
+            - args.shard_size (int): Taille des fichiers de sortie.
+            - args.train_prct (float): Ratio pour le train set.
+            - args.val_prct (float): Ratio pour le validation set.
+            - args.workers (int): Nombre de cœurs CPU à utiliser.
+
+    Returns:
+        None: La fonction imprime le progrès et le rapport final dans la sortie standard.
+    """
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
 
     # 1. SCAN & MAPPING (Parent Process)
-    # C'est ici qu'on fait le mapping exam_id -> h5_idx_src UNE SEULE FOIS.
+    # C'est ici qu'on fait le mapping exam_id -> h5_idx_src une fois
     try:
         full_df = scan_sources_and_map_indices(args.input)
     except Exception as e:
@@ -265,7 +324,7 @@ def run(args):
         chunks = np.array_split(split_df, n_shards)
 
         for i, chunk_df in enumerate(chunks):
-            # chunk_df contient déjà 'h5_idx_src', le worker n'a qu'à lire bêtement.
+            # chunk_df contient déjà 'h5_idx_src', le worker n'a qu'à lire bêtement
             shard_name = f"{split}_shard_{i:03d}.hdf5"
             tasks.append({
                 'output_path': os.path.join(out_dir, shard_name),
@@ -281,7 +340,7 @@ def run(args):
     with ctx.Pool(args.workers) as pool:
         results = list(tqdm(pool.imap_unordered(write_shard_task, tasks), total=len(tasks)))
 
-    # Rapport
+    # 5. Rapport
     success = [r for r in results if r.startswith("OK")]
     fails = [r for r in results if not r.startswith("OK")]
     
