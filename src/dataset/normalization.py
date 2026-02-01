@@ -2,7 +2,6 @@ import os
 import argparse
 import time
 from tqdm import tqdm
-import json
 
 from functools import partial
 import multiprocessing
@@ -10,44 +9,8 @@ import multiprocessing
 from aux import *
 
 
-def merge_labels(dataset, FINAL_CLASSES):
-    """
-    Merge certain labels in dataset['labels'] to match FINAL_CLASSES
-    dataset['labels'] shape (N, num_labels)
-    """
-    
-    # RBBB merge
-    dataset['labels'][:, FINAL_CLASSES.index("RBBB")] = (
-        dataset['labels'][:, FINAL_CLASSES.index("RBBB")] |
-        dataset['labels'][:, FINAL_CLASSES.index("CRBBB")] |
-        dataset['labels'][:, FINAL_CLASSES.index("IRBBB")]
-    )
 
-    # LBBB merge
-    dataset['labels'][:, FINAL_CLASSES.index("LBBB")] = (
-        dataset['labels'][:, FINAL_CLASSES.index("LBBB")] |
-        dataset['labels'][:, FINAL_CLASSES.index("CLBBB")]
-    )
-
-    # Sinus bradycardia / Brady
-    sb_idx = FINAL_CLASSES.index("SB")
-    brady_idx = FINAL_CLASSES.index("Brady")
-    sb = dataset['labels'][:, sb_idx]
-    brady = dataset['labels'][:, brady_idx]
-    # Sinus brady -> SB=1, Brady=0
-    dataset['labels'][:, sb_idx] = sb
-    dataset['labels'][:, brady_idx] = (~sb) & brady
-
-    # 1dAVb merge
-    dataset['labels'][:, FINAL_CLASSES.index("1dAVb")] = dataset['labels'][:, FINAL_CLASSES.index("IAVB")]
-
-    # ST merge
-    dataset['labels'][:, FINAL_CLASSES.index("ST")] = dataset['labels'][:, FINAL_CLASSES.index("STach")]
-
-    return dataset
-
-
-def worker1(couple, output, FINAL_CLASSES):
+def worker1(couple, output):
     """
     Orchestre la pipeline du traitement pour un hdf5 : 
     Chargement -> Rééchantillonnage (avec CSV) -> Normalisation -> Sauvegarde.
@@ -57,7 +20,6 @@ def worker1(couple, output, FINAL_CLASSES):
                         - filename (str): Le nom du fichier de sortie (ex: 'patient_01.hdf5').
                         - (path_h5, path_csv) : Les chemins complets vers les fichiers sources.
         output (str): Le chemin du répertoire où sauvegarder le fichier HDF5 traité.
-        FINAL_CLASSES (list): Liste des classes finales pour la fusion des labels.
     """
     name, path = couple
 
@@ -66,12 +28,11 @@ def worker1(couple, output, FINAL_CLASSES):
     dataset['tracings'] = time_serries_norm
 
     z_norm(dataset['tracings'])
-    dataset = merge_labels(dataset) # fusionne les labels selon les regles definies
 
     write_results(dataset, name, output)
 
 
-def worker2(couple, output, FINAL_CLASSES):
+def worker2(couple, output):
     """
     Orchestre une pipeline simplifié : Chargement -> Normalisation -> Sauvegarde.
 
@@ -81,13 +42,12 @@ def worker2(couple, output, FINAL_CLASSES):
     Args:
         couple (tuple): Un tuple (filename, (path_h5, path_csv)).
         output (str): Le chemin du répertoire de sortie.
-        FINAL_CLASSES (list): Liste des classes finales pour la fusion des labels.
     """
     name, path = couple
 
     dataset, _ = load(path, use_csv=False)
     dataset_norm = z_norm(dataset['tracings'])
-    dataset_norm = merge_labels(dataset_norm)
+
     write_results(dataset_norm, name, output)
 
 
@@ -109,11 +69,6 @@ def run(args):
             - args.output : Dossier de sortie.
             - args.workers : Nombre de processus parallèles.
     """
-
-    # Load FINAL_CLASSES from JSON
-    with open(args.class_map) as f:
-        FINAL_CLASSES = json.load(f)
-
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
 
@@ -127,7 +82,7 @@ def run(args):
         return
 
     patch_items1 = list(patch_dict1.items())
-    pool_worker = partial(worker1, output=args.output, FINAL_CLASSES=FINAL_CLASSES)
+    pool_worker = partial(worker1, output=args.output)
 
     print("Début de la normalisation du dataset1 vers le model du dataset2")
 
@@ -153,7 +108,7 @@ def run(args):
         return
 
     patch_items = list(patch_dict.items())
-    pool_worker = partial(worker2, output=args.output, FINAL_CLASSES=FINAL_CLASSES)
+    pool_worker = partial(worker2, output=args.output)
 
     with multiprocessing.get_context('spawn').Pool(args.workers) as pool:
         for _ in tqdm(pool.imap_unordered(pool_worker, patch_items),
@@ -178,8 +133,6 @@ def main():
     parser.add_argument('-d1', '--dataset1', type=str, default='../output/dataset1/')
     parser.add_argument('-d2', '--dataset2', type=str, default='../../../data/15_prct/')
     parser.add_argument('-o', '--output', type=str, default='../output/normalize_data')
-    # Added an argument for final class mapping file
-    parser.add_argument('--class_map', default='../../ressources/final_class.json', help="JSON ordered class list")
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
 
     args = parser.parse_args()
