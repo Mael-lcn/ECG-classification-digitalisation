@@ -1,6 +1,3 @@
-"""
-PAS ENCORE TESTER du coup jsp s'il va marcher ou non, peut-etre avoir des erreurs
-"""
 import os
 import sys
 import json
@@ -10,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import multiprocessing
+import csv
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
@@ -283,6 +281,7 @@ def main():
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--threshold', type=float, default=0.5) # may be optimized later
+    parser.add_argument('-o', '--output', type=str, default="output/evaluation")
     parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-2)
 
     args = parser.parse_args()
@@ -317,7 +316,7 @@ def main():
     # Model
     model = CNN(num_classes=len(class_list)).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    torch.compile(model)
+    model = torch.compile(model)
 
     print('Evaluating model...')
     # Evaluate
@@ -338,13 +337,21 @@ def main():
 
     print('Done.')
 
-    print("===== EVALUATION RESULTS =====")
-    print(f"AUROC          : {auroc:.4f}")
-    print(f"AUPRC          : {auprc:.4f}")
-    print(f"Accuracy       : {acc:.4f}")
-    print(f"Macro F1       : {f1:.4f}")
-    print(f"Challenge Score: {challenge:.4f}")
-    print("================================")
+
+    # Save metrics to CSV
+    fieldnames = ['AUROC', 'AUPRC', 'Accuracy', 'Macro_F1', 'Challenge_Score']
+    values = [auroc, auprc, acc, f1, challenge]
+
+    os.makedirs(args.output, exist_ok=True)
+    name = os.path.splitext(os.path.basename(args.checkpoint))[0]
+    output_csv = os.path.join(args.output, f"{name}_metrics.csv")
+
+    with open(output_csv, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(fieldnames)
+        writer.writerow(values)
+
+    print(f"Evaluation metrics saved to {output_csv}")
 
 
 if __name__ == "__main__":
