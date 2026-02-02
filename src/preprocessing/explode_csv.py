@@ -31,5 +31,6 @@ try:
         group_df.to_csv(output_path, index=False)
         print(f"   -> Fichier créé : {safe_filename} ({len(group_df)} lignes)")
 
+        os.remove(input_csv)
 except Exception as e:
     print(f"\nERREUR : {e}")
