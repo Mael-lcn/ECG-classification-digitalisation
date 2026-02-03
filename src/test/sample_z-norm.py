@@ -195,12 +195,10 @@ def run_checks(data, csv_meta, target_fo=400):
     
     # --- ETAPE 1 : RESAMPLING ---
     print(f"\n1. Exécution re_sampling (Cible: {target_fo}Hz)...")
-    try:
-        resampled = re_sampling(data, csv_meta, fo=target_fo)
-        print(f"   Succès. Output Shape: {resampled.shape}")
-    except Exception as e:
-        print(f"   CRASH re_sampling: {e}")
-        return
+    #try:
+    resampled = re_sampling(data, csv_meta, fo=target_fo)
+    print(f"   Succès. Output Shape: {resampled.shape}")
+
 
     # Check intégrité resampling
     errors_integrity = 0
