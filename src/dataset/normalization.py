@@ -25,9 +25,7 @@ def worker1(couple, output):
 
     dataset, csv = load(path)
     time_serries_norm = re_sampling(dataset, csv)
-    dataset['tracings'] = time_serries_norm
-
-    z_norm(dataset['tracings'])
+    dataset['tracings'] = z_norm(time_serries_norm)
 
     write_results(dataset, name, output)
 
@@ -46,9 +44,9 @@ def worker2(couple, output):
     name, path = couple
 
     dataset, _ = load(path, use_csv=False)
-    dataset_norm = z_norm(dataset['tracings'])
+    dataset['tracings'] = z_norm(dataset['tracings'])
 
-    write_results(dataset_norm, name, output)
+    write_results(dataset, name, output)
 
 
 

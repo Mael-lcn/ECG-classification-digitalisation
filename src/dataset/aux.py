@@ -113,115 +113,147 @@ def write_results(data_dict, name, output_dir):
 """
 def re_sampling(data, csv, fo=400):
     """
-    Rééchantillonnage intelligent (Two-Pass strategy).
+    Rééchantillonne les signaux ECG vers une fréquence cible.
 
-    Problème : On a des signaux de fréquences ET de durées variées.
-    - Un signal 100Hz de 10s fait 1000 points. -> Devient 4000 points à 400Hz.
-    - Un signal 500Hz de 10s fait 5000 points. -> Devient 4000 points à 400Hz.
-
-    On ne peut pas deviner la taille du tableau final sans regarder la longueur 'utile'
-    de chaque signal avant de commencer.
+    Cette fonction utilise une stratégie de "Double Grouping" (Fréquence + Longueur)
+    pour combiner la vitesse de la vectorisation et la précision du traitement signal.
+    Elle détecte la longueur utile réelle de chaque signal pour éviter de rééchantillonner
+    le padding (zéros), ce qui prévient les artefacts d'oscillation (phénomène de Gibbs).
 
     Args:
-        data (dict): Contient les données brutes. Doit avoir les clés :
-            - 'tracings' (np.ndarray) : Tensor de forme (N_exams, T_samples, 12_channels).
-            - 'exam_id' (list/array) : Identifiants correspondants aux tracés.
-        csv (pd.DataFrame): Métadonnées contenant au moins les colonnes 'exam_id' et 'freq'.
+        data (dict): Dictionnaire contenant les données brutes HDF5. Doit contenir :
+            - 'tracings' (np.ndarray) : Tenseur de forme (N_samples, Time, Channels).
+            - 'exam_id' (array-like) : Identifiants des examens associés aux tracés.
+        csv (pd.DataFrame): DataFrame contenant les métadonnées. Doit contenir :
+            - 'exam_id' : Identifiant de l'examen (lien avec 'data').
+            - 'frequences' : Fréquence d'échantillonnage d'origine (Hz).
         fo (int, optional): Fréquence d'échantillonnage cible en Hz. Par défaut 400.
 
     Returns:
-        np.ndarray: Un nouveau tenseur de forme (N, T_new, 12) contenant les signaux
-                    rééchantillonnés, alignés et padés si nécessaire.
+        np.ndarray: Un nouveau tenseur de forme (N, T_new, Channels) contenant les
+                    signaux rééchantillonnés. Les signaux sont alignés à gauche et
+                    padés avec des zéros à la fin.
     """
-    tracings = data['tracings'] # Shape (N, Total_Buffer_Len, Channels)
+    # Extraction des données sources
+    tracings = data['tracings']  # Shape: (N, T, C)
     all_ids = data['exam_id']
 
-    # Mapping ID -> Index
-    id_map = {
-        (x.decode('utf-8') if isinstance(x, bytes) else str(x)): i 
-        for i, x in enumerate(all_ids)
-    }
+    n_samples, n_time, n_channels = tracings.shape
 
-    # Regroupement par fréquence
-    freq_to_id = csv.groupby('frequences')['exam_id'].apply(list).to_dict()
+    # 1 : Détection de la "Vraie Longueur" (Active Signal Detection)
+    # On cherche à ignorer le padding final (les suites de zéros).
 
-    # Passe 1 : calcul de la taille maximal d'un signal
-    max_required_len = 0
+    # Seuil de tolérance pour considérer qu'il y a du signal (vs bruit numérique)
 
-    # On stocke les infos de découpe pour ne pas les recalculer à la passe 2
-    groups_metadata = {} 
+    # Masque 2D (N, T) : True si au moins un canal dépasse le seuil à l'instant t.
+    # On utilise axis=2 pour "écraser" les canaux et voir l'activité temporelle globale.
+    is_active = np.max(np.abs(tracings), axis=2) > 1e-6
 
-    for fi, ids_list in freq_to_id.items():
-        indexes = [id_map[str(x)] for x in ids_list if str(x) in id_map]
-        if not indexes: continue
+    # 1. On inverse l'axe temporel (flip).
+    # 2. On utilise argmax qui s'arrête au premier 'True' rencontré.
+    flipped_active = is_active[:, ::-1]
+    zeros_at_end = np.argmax(flipped_active, axis=1)
 
-        # On regarde ce lot brut
-        batch = tracings[indexes] 
+    # La longueur utile est la taille totale moins le nombre de zéros à la fin.
+    real_lengths = n_time - zeros_at_end
 
-        # Détection de la longueur utile (On admet que les 0 de padding sont à la fin)
-        # On cherche la dernière colonne qui n'est pas vide
-        # (N, T, C) -> On écrase N (0) et C (2) pour ne garder que le profil Temporel (T,)
-        time_profile = np.max(np.abs(batch), axis=(0, 2))
+    # Si un signal est entièrement vide (tout < THRESHOLD), argmax renvoie 0.
+    # Dans ce cas, real_lengths vaudrait n_time (incorrect). On force la longueur à 0.
+    has_any_signal = np.any(is_active, axis=1)
+    real_lengths[~has_any_signal] = 0
 
-        active_indices = np.flatnonzero(time_profile > 1e-6)
 
-        if active_indices.size > 0:
-            # On prend le dernier index actif + 1
-            real_len = active_indices[-1] + 1
-        else:
-            real_len = 0
+    # 2 : Mapping des longueurs vers le CSV
+    # On doit associer la longueur calculée (issue du HDF5) aux métadonnées (CSV)
+    # pour pouvoir grouper les traitements.
 
-        # Calcul de la taille projetée après resampling
-        # Formule : N_out = N_in * (F_out / F_in)
-        if real_len > 0:
-            projected_len = int(np.ceil(real_len * fo / fi))
-        else:
-            projected_len = 0
+    # Création d'un dictionnaire de correspondance : ID -> Longueur
+    id_to_len = {}
+    for i, exam_id in enumerate(all_ids):
+        # Gestion robuste des formats : décodage bytes -> string si nécessaire
+        key = exam_id.decode('utf-8') if isinstance(exam_id, bytes) else str(exam_id)
+        id_to_len[key] = real_lengths[i]
 
-        # On met à jour le record global
-        if projected_len > max_required_len:
-            max_required_len = projected_len
+    # Création d'un mapping inverse : ID -> Index dans le tableau tracings
+    # Cela permettra de savoir où écrire le résultat final.
+    id_map = {k: i for k, i in id_to_len.items()}
 
-        # On sauvegarde les métadonnées pour aller vite ensuite
-        groups_metadata[fi] = {
-            'indexes': indexes,
-            'real_len': real_len,
-            'projected_len': projected_len
-        }
+    # Injection de la longueur dans le DataFrame CSV via mapping
+    # On convertit les IDs du CSV en string pour garantir la correspondance
+    csv_ids = csv['exam_id'].astype(str)
+    csv['temp_len'] = csv_ids.map(id_to_len)
 
-    # Sécurité : Si tout est vide
+    # Nettoyage : On ne garde que les entrées du CSV qui existent réellement dans le HDF5
+    # (dropna supprime les lignes où temp_len est NaN)
+    csv_valid = csv[csv['temp_len'].notna()].copy()
+    csv_valid['temp_len'] = csv_valid['temp_len'].astype(int)
+
+
+    # ÉTAPE 3 : Allocation de la mémoire (Tenseur de sortie)
+
+    # Calcul de la taille requise APRES rééchantillonnage pour chaque signal
+    # Formule : N_out = ceil( Length_in * F_out / F_in )
+    if not csv_valid.empty:
+        csv_valid['needed_len'] = np.ceil(
+            csv_valid['temp_len'] * fo / csv_valid['frequences']
+        ).astype(int)
+        # On prend le maximum pour dimensionner le tenseur final
+        max_required_len = csv_valid['needed_len'].max()
+    else:
+        max_required_len = 0
+
+    # Cas limite : si aucun signal valide n'est trouvé
     if max_required_len == 0:
-        return np.zeros((tracings.shape[0], 1, tracings.shape[2]), dtype=np.float32)
+        return np.zeros((n_samples, 1, n_channels), dtype=np.float32)
 
-    # On crée le tableau de taille max sur T
-    new_tracings = np.zeros((tracings.shape[0], max_required_len, tracings.shape[2]), dtype=np.float32)
+    # Allocation du tenseur final rempli de zéros.
+    # Le padding "post-resample" est donc géré implicitement par cette initialisation.
+    new_tracings = np.zeros(
+        (n_samples, int(max_required_len), n_channels), 
+        dtype=np.float32
+    )
 
 
-    # Passe 2 : resampling
-    for fi, meta in groups_metadata.items():
-        indexes = meta['indexes']
-        real_len = meta['real_len']
+    # 4 : Traitement par Lots (Batch Processing)
 
-        if real_len == 0: continue
+    # Optimisation clé : On groupe par (Fréquence, Longueur).
+    # Tous les signaux d'un groupe ont la même géométrie, ce qui permet la vectorisation.
+    groups = csv_valid.groupby(['frequences', 'temp_len'])
+
+    for (fi, length_in), group_df in groups:
+        # On ignore les signaux vides
+        if length_in == 0:
+            continue
+
+        # Récupération des indices dans le tenseur numpy correspondant à ce groupe
+        batch_ids = group_df['exam_id'].astype(str).values
+        # Liste en compréhension rapide pour obtenir les indices entiers
+        indexes = [id_map[bid] for bid in batch_ids if bid in id_map]
+
+        if not indexes:
+            continue
 
         # 1. Extraction
-        batch_trimmed = tracings[indexes, :real_len, :]
+        # On extrait la tranche [0 : length_in]. Comme tous les signaux du groupe
+        # ont cette longueur exacte, le tableau batch_data ne contient AUCUN zéro de padding.
+        batch_data = tracings[indexes, :length_in, :]
 
-        # 2. Resampling
+        # 2. Rééchantillonnage
+        # Calcul du PGCD pour les ratios up/down entiers
         gcd = np.gcd(int(fo), int(fi))
         up = int(fo // gcd)
         down = int(fi // gcd)
 
-        resampled_batch = signal.resample_poly(batch_trimmed, up, down, axis=1)
+        # Application sur l'axe temporel (axis=1)
+        resampled_batch = signal.resample_poly(batch_data, up, down, axis=1)
 
-        # 3. Placement
-        # On colle le résultat dans le grand tableau
-        # Comme new_tracings est rempli de 0, le padding se fait tout seul
+        # 3. Stockage du résultat
         current_len = resampled_batch.shape[1]
 
-        # Petit clip de sécurité (au cas où ceil/resample_poly diffèrent de 1 pixel)
-        limit = min(max_required_len, current_len)
+        # Sécurité : on s'assure de ne pas dépasser la taille allouée (arrondi)
+        limit = min(current_len, max_required_len)
 
+        # Insertion dans le grand tableau
         new_tracings[indexes, :limit, :] = resampled_batch[:, :limit, :]
 
     return new_tracings
@@ -233,7 +265,7 @@ def re_sampling(data, csv, fo=400):
 """
 def z_norm(tracings):
     """
-    Normalisation vectorisée sans aucune boucle Python.
+    Normalisation vectorisée.
 
     1. Calcule Starts/Ends pour tout le monde (N, C).
     2. Construit un masque 3D (N, T, C) via broadcasting.
@@ -242,7 +274,7 @@ def z_norm(tracings):
     _, n_time, _ = tracings.shape
 
     # Détection des bornes
-    is_nonzero = np.abs(tracings) > 0
+    is_nonzero = np.abs(tracings) > 1e-6
 
     # Matrices (N, C) des indices de début et de fin
     starts = np.argmax(is_nonzero, axis=1)
