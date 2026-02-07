@@ -432,4 +432,4 @@ def add_bilateral_padding(tracings, target_size):
 
         new_tracing[i, :, o : o + l] = tracings[i, :, s : e]
 
-    return new_tracing
+    return new_tracing, lengths
