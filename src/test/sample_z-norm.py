@@ -220,6 +220,86 @@ def test_hard_cases_boundaries():
     print("\n" + "="*60)
 
 
+def test_bilateral_padding_logic():
+    """
+    Test unitaire dédié à la fonction add_bilateral_padding.
+    Vérifie :
+    1. Que le signal court est bien centré dans la cible (Padding).
+    2. Que les dimensions sont respectées.
+    3. Que le code plante (RuntimeError) si le signal est trop long (comportement voulu).
+    """
+    from src.dataset.aux import add_bilateral_padding  # Assurez-vous que l'import est là
+
+    print("\n" + "="*60)
+    print("TEST UNITAIRE : Bilateral Padding (Centrage)")
+    print("="*60)
+
+    target_size = 10
+    
+    # --- Création d'un Batch Synthétique (N=3, C=1, T=20) ---
+    # On met T=20 pour avoir de la marge autour des signaux
+    input_tensor = torch.zeros((3, 1, 20), dtype=torch.float32, device=DEVICE)
+
+    # PATIENT 0 : Signal pair (Longueur 4) -> Doit être centré
+    # Indices [5:9] = 1.0
+    input_tensor[0, :, 5:9] = 1.0
+    
+    # PATIENT 1 : Signal impair (Longueur 5) -> Doit être centré (décalage asymétrique de 1)
+    # Indices [2:7] = 2.0
+    input_tensor[1, :, 2:7] = 2.0
+
+    # PATIENT 2 : Signal TROP LONG (Longueur 15) -> Doit planter
+    # Indices [0:15] = 3.0
+    input_tensor[2, :, 0:15] = 3.0
+
+    print(f"   Configuration : Target Size = {target_size}")
+    print(f"   Input Batch (N=3) :")
+    print(f"     - P0: Len 4 (Pair)")
+    print(f"     - P1: Len 5 (Impair)")
+    print(f"     - P2: Len 15 (Trop long -> Doit Crash)")
+
+    # --- TEST 1 : Padding Valide (P0 et P1 seulement) ---
+    print("\n1. Test du Padding (Cas valides)...")
+    
+    # On prend uniquement les 2 premiers patients valides
+    valid_batch = input_tensor[0:2]
+    padded_output = add_bilateral_padding(valid_batch, target_size=target_size)
+
+    # Vérification P0 (Len 4 dans Target 10 -> Offset (10-4)//2 = 3)
+    # Attendu : [0, 0, 0, 1, 1, 1, 1, 0, 0, 0]
+    row0 = padded_output[0, 0].cpu().numpy()
+    check0 = np.allclose(row0[3:7], 1.0) and (row0[:3].sum() == 0) and (row0[7:].sum() == 0)
+    
+    print(f"   [P0] Attendu : 3 zéros - 4 ones - 3 zéros")
+    print(f"        Obtenu  : {row0}")
+    print(f"        Statut  : {'SUCCÈS' if check0 else 'ÉCHEC'}")
+
+    # Vérification P1 (Len 5 dans Target 10 -> Offset (10-5)//2 = 2)
+    # Attendu : [0, 0, 2, 2, 2, 2, 2, 0, 0, 0]
+    row1 = padded_output[1, 0].cpu().numpy()
+    check1 = np.allclose(row1[2:7], 2.0) and (row1[:2].sum() == 0) and (row1[7:].sum() == 0)
+
+    print(f"   [P1] Attendu : 2 zéros - 5 twos - 3 zéros")
+    print(f"        Obtenu  : {row1}")
+    print(f"        Statut  : {'SUCCÈS' if check1 else 'ÉCHEC'}")
+
+    # --- TEST 2 : Crash Attendu (P2) ---
+    print("\n2. Test du Crash de Sécurité (Signal > Target)...")
+    
+    try:
+        # On passe le patient 2 qui fait 15 de long (target=10)
+        # Cela DOIT lever une RuntimeError lors de l'assignation slice
+        _ = add_bilateral_padding(input_tensor[2:3], target_size=target_size)
+        print("   ÉCHEC : La fonction aurait dû planter mais a continué.")
+    except RuntimeError as e:
+        print(f"   SUCCÈS : La fonction a planté comme prévu.")
+        print(f"      Message : {e}")
+    except Exception as e:
+        print(f"   SUCCÈS PARTIEL : A planté, mais pas l'erreur attendue ({type(e)}).")
+
+    print("\n" + "="*60)
+
+
 def run_checks(data, csv_meta, target_fo=400):
     print("="*60)
     print("DÉBUT DU PIPELINE DE VALIDATION")
@@ -227,6 +307,7 @@ def run_checks(data, csv_meta, target_fo=400):
     start_time = time.time()
 
     test_hard_cases_boundaries()
+    test_bilateral_padding_logic()
 
     # Vérification du format d'entrée
     tracings = data['tracings']

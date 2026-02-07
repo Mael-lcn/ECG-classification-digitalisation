@@ -107,7 +107,7 @@ def load(path, use_csv=True, to_gpu=True):
     return h5_content, csv_data
 
 
-def write_results(data_dict, name, output_dir):
+def write_results(data_dict, csv, name, output_dir):
     """
     Sauvegarde le contenu d'un dictionnaire dans un fichier HDF5.
     Adapte automatiquement les Tenseurs GPU vers CPU/Numpy.
@@ -138,6 +138,19 @@ def write_results(data_dict, name, output_dir):
                 print(f"   -> Dataset '{key}' sauvegardé. Shape: {shape_str}")
             except Exception as e:
                 print(f"   [ERREUR] Échec écriture '{key}': {e}")
+
+    if csv is not None:
+        # On remplace l'extension .hdf5 par .csv pour le nom
+        csv_name = name.replace(".hdf5", ".csv")
+        csv_path = os.path.join(output_dir, csv_name)
+
+        try:
+            csv.to_csv(csv_path, index=False)
+        except Exception as e:
+            print(f"   [ERREUR] Échec écriture CSV: {e}")
+
+
+
 
 
 """
@@ -231,7 +244,7 @@ def re_sampling(data, csv, fo=400):
         raw_id = all_ids[i]
         # Décodage robuste bytes/str
         s_id = raw_id.decode('utf-8') if isinstance(raw_id, bytes) else str(raw_id)
-        
+
         id_to_len[s_id] = real_lengths[i]
         id_to_idx[s_id] = i
 
@@ -377,20 +390,46 @@ def z_norm(tracings, eps=1e-5):
     return data_norm
 
 
-
-def add_bilateral_padding(tracings, size):
+def add_bilateral_padding(tracings, target_size):
     """
-    Ajoute le padding de manière équi-égal sur la gouche et la droite et slice le signal à l'intérieur
+    Centre le signal actif dans une fenêtre de taille target_size.
 
     Args:
-        tracings (torch.Tensor): (N, C, T) sur GPU.
-        size (int): taille total du padding a jouté.
+        tracings (torch.Tensor): (N, C, T) ou (C, T).
+        target_size (int): Taille cible.
 
     Returns:
-        torch.Tensor: (N, C, T) normalisé.
+        torch.Tensor: (N, C, target_size) paddé.
     """
-    # 1. récupère le signal utile
+    # Sécurité Dimension
+    if tracings.dim() == 2:
+        tracings = tracings.unsqueeze(0)
 
-    # 2. ajoute le padding
+    N, C, _ = tracings.shape
 
-    # 3. retourne le nouveau tenseur
+    # Récupération des bornes actives
+    # start_idxs et end_idxs sont des tenseurs de taille (N,)
+    start_idxs, end_idxs = get_active_boundaries(tracings)
+
+    # 3. Calculs Vectorisés (Préparation)
+    lengths = end_idxs - start_idxs                 # (N,)
+    offsets = (target_size - lengths).div(2, rounding_mode='floor') # (N,)
+
+    # 4. Création du conteneur
+    new_tracing = torch.zeros((N, C, target_size), dtype=tracings.dtype, device=tracings.device)
+
+    # 5. Injection du signal
+    for i in range(N):
+        l = lengths[i].item()
+
+        # Sécurité pour les signaux vides
+        if l <= 0:
+            continue
+
+        o = offsets[i].item()
+        s = start_idxs[i].item()
+        e = end_idxs[i].item()
+
+        new_tracing[i, :, o : o + l] = tracings[i, :, s : e]
+
+    return new_tracing
