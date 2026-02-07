@@ -329,7 +329,7 @@ def add_bilateral_padding(tracings, target_size):
     if tracings.dim() == 2:
         tracings = tracings.unsqueeze(0)  # (1, C, T)
 
-    N, C, T = tracings.shape
+    N, C, _ = tracings.shape
     device = tracings.device
 
     # Détection des bornes actives

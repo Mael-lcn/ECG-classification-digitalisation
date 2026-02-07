@@ -14,7 +14,7 @@ class MegaBatchSortishSampler(Sampler):
     """
     def __init__(self, dataset, batch_size, mega_batch_factor=50, shuffle=True):
         """
-        Ia carte des longueurs (lengths) : Il doit savoir que l'indice 50 dure 3000 points et l'indice 51 dure 4500 points.
+        La carte des longueurs (lengths) : Il doit savoir que l'indice 50 dure 3000 points et l'indice 51 dure 4500 points.
         C'est pour cela qu'on lui passe le Dataset.
 
         Les paramètres de structure :
@@ -58,12 +58,25 @@ class MegaBatchSortishSampler(Sampler):
            c. Découper ce Mega-Chunk trié en petits morceaux de 'batch_size'.
            d. YIELD (renvoyer) chaque petit morceau (liste d'indices).
         """
+        
+        """
+        Mélange Global (si self.shuffle est True) : Génères une liste de tous les indices de 0 à N-1 et la mélanges (avec indices = np.random.permutation(len(self.dataset)) ).
+
+        Découpage en Mega-Batches : parcours cette liste mélangée par pas de mega_batch_size.
+
+        Tri Local : Pour chaque Mega-Batch
+
+        Récupère les longueurs de ces indices précis.
+
+        Trie les indices de ce groupe du plus long au plus court.
+
+        Création des mini-batches (Le "Out") : découpes ce groupe trié en morceaux de la taille de batch_size et fais un yield pour chaque morceau.
+        """
         pass
 
 
     def __len__(self):
         """
         Renvoie le nombre total de batches dans une époque.
-        Calcul : (Taille Dataset + batch_size - 1) // batch_size
         """
-        pass
+        return (self.dataset.length + self.batch_size-1) // self.batch_size

@@ -80,9 +80,13 @@ class LargeH5Dataset(Dataset):
             with h5py.File(p, 'r') as f:
                 n_samples = f['exam_id'].shape[0]
                 cumul += n_samples
+
             self.cumulative_sizes.append(cumul)
 
         self.total_length = cumul
+
+        self.all_lengths = np.concatenate([pd.read_csv(c, usecols=['length'])['length'].values for c in self.csv_paths])
+
         print(f"Dataset prêt : {self.total_length} échantillons au total.")
 
 
