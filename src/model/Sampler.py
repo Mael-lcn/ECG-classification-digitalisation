@@ -1,5 +1,4 @@
 from torch.utils.data import Sampler
-import numpy as np
 
 
 
@@ -15,11 +14,12 @@ class MegaBatchSortishSampler(Sampler):
     """
     def __init__(self, dataset, batch_size, mega_batch_factor=50, shuffle=True):
         """
-        Ia carte des longueurs (lengths) : Il doit savoir que l'indice 50 dure 3000 points et l'indice 51 dure 4500 points. C'est pour cela qu'on lui passe le Dataset (ou directement la liste des longueurs extraite des CSV).
+        Ia carte des longueurs (lengths) : Il doit savoir que l'indice 50 dure 3000 points et l'indice 51 dure 4500 points.
+        C'est pour cela qu'on lui passe le Dataset.
 
         Les paramètres de structure :
         batch_size (64) : Pour savoir comment découper les groupes.
-        mega_batch_factor (50) : Pour savoir quelle taille de "piscine" d'indices il doit mélanger avant de trier.
+        mega_batch_factor (50) : Pour savoir quelle taille de l'ensemble d'indices il doit mélanger avant de trier.
 
         Args:
             dataset (Dataset): Ton dataset (doit avoir un moyen d'accéder à la longueur).

@@ -20,7 +20,7 @@ MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 
 # Limite de sécurité VRAM (en Go). Le GPU fait environ 10Go, on réserve 2Go pour le système/overhead
-VRAM_LIMIT_GB = 8.0 
+VRAM_LIMIT_GB = 9.0 
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
@@ -34,7 +34,7 @@ def estimate_vram_gb(path_h5):
             shape = f['tracings'].shape
             # N * C * T * 4 bytes / 1024^3
             size_gb = (torch.tensor(shape).prod().item() * 4) / (1024**3)
-            # Facteur 4 car resampling + z-norm créent des copies temporaires
+            # Facteur 2 car resampling + z-norm créent des copies temporaires
             return max(size_gb * 2, 0.2)
     except:
         return 0.5
@@ -42,56 +42,129 @@ def estimate_vram_gb(path_h5):
 
 def unified_worker(task, output):
     """
-    Worker polyvalent avec gestion dynamique de l'admission GPU.
+    Orchestrateur de traitement ECG avec gestion de mémoire par segmentation (Chunks).
+
+    Cette fonction traite des fichiers HDF5 massifs (5Go+) sur une VRAM limitée (9.6Go) 
+    en suivant une stratégie de "chargement unique et traitement par morceaux". 
+    Elle garantit l'alignement entre les signaux (HDF5) et les métadonnées (CSV) 
+    en utilisant les 'exam_id' comme clés de synchronisation.
+
+    Processus :
+    1. Admission contrôlée par budget VRAM (Lock) pour éviter les crashs simultanés.
+    2. Chargement HDF5 (GPU) et CSV (CPU).
+    3. Découpage en 3 chunks via des 'vues' (narrow) pour éviter la duplication inutile.
+    4. Réalignement dynamique du CSV pour chaque chunk à partir des exam_id.
+    5. Traitement (Resampling + Z-Norm) et reconstruction finale sécurisée.
+    6. Libération agressive de la mémoire (GC + Cache CUDA).
+
+    Args:
+        task (tuple): (mode, name, path) où path est (path_hdf5, path_csv).
+        output (str): Répertoire de destination pour les résultats.
     """
     global current_vram_usage
     mode, name, path = task
     path_h5 = path[0]
 
-    # 1. Estimation du coût VRAM
+    # On évalue le poids du fichier pour ne pas dépasser la capacité du GPU
     cost = estimate_vram_gb(path_h5)
-    print("QUEUE", f"{name} | mode={mode} | estimated={cost:.2f} GB")
 
-
-    # 2. Admission contrôlée
     with vram_lock:
         while current_vram_usage + cost > VRAM_LIMIT_GB:
-            vram_lock.wait()    # Attend qu'un autre thread libère de la place
+            vram_lock.wait()
         current_vram_usage += cost
 
-    print("START"f"{name} | allocated={cost:.2f} GB | "f"total={current_vram_usage:.2f}/{VRAM_LIMIT_GB} GB")
-
-    dataset, csv = None, None
+    dataset, csv_full = None, None
     try:
-        # 3. Pipeline de traitement
-        dataset, csv = load(path, use_csv=True, to_gpu=True)
+        # dataset['tracings'] est envoyé sur GPU, 'exam_id' reste sur CPU (via load)
+        dataset, csv_full = load(path, use_csv=True, to_gpu=True)
+        tracings = dataset['tracings']
+        exam_ids = dataset['exam_id']
+        N = tracings.shape[0]
 
-        if mode == 'D1':
-            dataset['tracings'] = re_sampling(dataset, csv, fo=TARGET_FREQ)
-            csv['frequences'] = TARGET_FREQ
-        else:
-            # Dataset 2 : Normalisation simple
-            if csv is not None and "normal_ecg" in csv.columns:
-                csv = csv.rename(columns={"normal_ecg": "NSR"})
+        # Préparation du CSV : Indexation par 'exam_id' pour un réalignement rapide
+        csv_full['exam_id'] = csv_full['exam_id'].astype(str)
+        csv_indexed = csv_full.set_index('exam_id')
 
-        dataset['tracings'] = z_norm(dataset['tracings'])
-        dataset['tracings'], lengths = add_bilateral_padding(dataset['tracings'], MAX_SIGNAL_LENGTH)
-        csv['length'] = lengths     # Créer une colonne avec la lg utile du signal pour la suite
+        # Traitement par chunks
+        # Définition des bornes pour diviser le batch en 3 parties égales
+        indices = [0, N // 3, (2 * N) // 3, N]
+        processed_chunks = []
 
-        write_results(dataset, csv, name, output)
+        for i in range(3):
+            start, end = indices[i], indices[i+1]
+            if start == end: continue
+
+            # .narrow() crée une vue
+            chunk_tracings = tracings.narrow(0, start, end - start)
+            chunk_ids_raw = exam_ids[start:end]
+
+            # Conversion des IDs du segment pour l'extraction du CSV
+            chunk_ids_str = [
+                eid.decode('utf-8') if isinstance(eid, (bytes, bytearray)) else str(eid) 
+                for eid in chunk_ids_raw
+            ]
+
+            # Extraction des métadonnées correspondant au chunk
+            chunk_csv = csv_indexed.reindex(chunk_ids_str).reset_index()
+
+            if mode == 'D1':
+                temp_data = {'tracings': chunk_tracings, 'exam_id': chunk_ids_raw}
+                # Le resampling crée un nouveau tenseur
+                chunk_result = re_sampling(temp_data, chunk_csv, fo=TARGET_FREQ)
+            else:
+                chunk_result = chunk_tracings
+
+            # Normalisation Z-score in-place
+            z_norm(chunk_result)
+
+            # Stockage du résultat intermédiaire du chunk
+            processed_chunks.append(chunk_result)
+
+            # Nettoyage des objets intermédiaires pour libérer de l'espace de travail
+            del chunk_ids_str, chunk_csv
+            torch.cuda.empty_cache()
+            print(f"   -> [{name}] Bloc {i+1}/3 traité")
+
+        dataset['tracings'] = None 
+        del tracings
+        torch.cuda.empty_cache()
+
+        # Fusion des morceaux
+        dataset['tracings'] = torch.cat(processed_chunks, dim=0)
+        del processed_chunks
+
+        # On réordonne le CSV complet selon l'ordre exact des exam_id du HDF5
+        final_h5_ids = [
+            eid.decode('utf-8') if isinstance(eid, (bytes, bytearray)) else str(eid) 
+            for eid in exam_ids
+        ]
+        final_csv = csv_indexed.reindex(final_h5_ids).reset_index()
+
+        # Harmonisation des colonnes selon le mode (D1 vs Classification)
+        if mode != 'D1':
+            final_csv.rename(columns={"normal_ecg": "NSR"}, inplace=True)
+
+        final_csv['length'] = 1
+
+        #Save
+        write_results(dataset, final_csv, name, output)
 
     except Exception as e:
-        print(f"\n[Erreur] {name} ({mode}) : {e}")
+        print(f"   [ERREUR FATALE] {name} : {str(e)}")
+        raise e
+
     finally:
-        # Libération de la mémoire et du budget
+        #Nettoyage
         if dataset is not None: del dataset
-        if csv is not None: del csv
+        if csv_full is not None: del csv_full
         gc.collect()
         torch.cuda.empty_cache()
 
+        # Libération de l'admission VRAM pour les threads en attente
         with vram_lock:
             current_vram_usage -= cost
-            vram_lock.notify_all()  # Réveille les threads en attente
+            vram_lock.notify_all()
+
 
 
 def run(args):
@@ -101,7 +174,7 @@ def run(args):
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
 
-    # 1. Collecte et étiquetage des tâches
+    # Collecte et étiquetage des tâches
     print("Indexation des fichiers...")
     all_tasks = []
 
@@ -124,8 +197,7 @@ def run(args):
     print(f"Traitement de {len(all_tasks)} fichiers avec {args.workers} threads.")
     print(f"Gestion dynamique de la VRAM (Limite: {VRAM_LIMIT_GB} GB).")
 
-    # 3. Exécution parallèle
-    # car le verrou VRAM empêchera le GPU d'exploser
+    # Exécution parallèle
     worker_func = partial(unified_worker, output=args.output)
 
     with ThreadPool(args.workers) as pool:

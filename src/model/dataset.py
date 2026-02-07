@@ -11,7 +11,7 @@ import numpy as np
 
 class LargeH5Dataset(Dataset):
     """
-    Dataset PyTorch optimisé pour la lecture séquentielle de données volumineuses (Out-of-Core).
+    Dataset PyTorch optimisé pour la lecture séquentielle de données volumineuses.
 
     Ce dataset gère des données fragmentées en multiples paires de fichiers HDF5 (tracés) 
     et CSV (labels).
@@ -58,7 +58,6 @@ class LargeH5Dataset(Dataset):
 
         for h5_p in all_h5:
             # On déduit le nom du CSV attendu à partir du nom du H5
-            # Ex: "data/train_shard_000.hdf5" -> "data/train_shard_000.csv"
             base_name = os.path.splitext(h5_p)[0] # enleve .hdf5
             expected_csv = base_name + '.csv'
 
@@ -141,7 +140,7 @@ class LargeH5Dataset(Dataset):
         return tracing_tensor, label_tensor
 
 
-    def _load_new_file_resources(self, file_idx: int):
+    def _load_new_file_resources(self, file_idx):
         """
         Méthode interne pour gérer la transition entre deux fichiers.
         Ferme les ressources précédentes et charge les nouvelles métadonnées en RAM.

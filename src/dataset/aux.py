@@ -50,7 +50,7 @@ def load(path, use_csv=True, to_gpu=True):
     """
     Charge les données HDF5/CSV.
 
-    SPÉCIFIQUE : Seul le dataset nommé 'tracings' est envoyé sur le GPU.
+    Seul le dataset nommé 'tracings' est envoyé sur le GPU.
     Tout le reste ('exam_id', etc.) reste sur le CPU.
 
     Args:
@@ -71,8 +71,8 @@ def load(path, use_csv=True, to_gpu=True):
     # Charge tout le HDF5 en RAM
     h5_content = {}
     with h5py.File(path_hd, 'r') as f:
-        for key in f.keys():
-            h5_content[key] = f[key][:] # Charge en Numpy array
+        h5_content['tracings'] = f['tracings'][:].astype(np.float32)
+        h5_content['exam_id'] = f['exam_id'][:]
 
     if to_gpu:
         # Détection automatique du GPU
@@ -83,26 +83,7 @@ def load(path, use_csv=True, to_gpu=True):
         else:
             device = torch.device("cpu")
 
-        data_cpu = h5_content['tracings']
-
-        # A. Conversion en Tensor
-        tensor = torch.from_numpy(data_cpu) # (N, T, C)
-
-        # B. Permutation (N, T, C) -> (N, C, T)
-        # Standard en PyTorch pour éviter les erreurs de dimension
-        tensor = tensor.permute(0, 2, 1)
-
-        # C. Contiguous
-        # Réorganise la mémoire physiquement pour éviter RuntimeError: view size...
-        tensor = tensor.contiguous()
-
-        # Typage Float32
-        if tensor.dtype == torch.float64:
-            tensor = tensor.float()
-
-        # E. Transfert GPU
-        h5_content['tracings'] = tensor.to(device)
-        print(f"Données 'tracings' converties (N, C, T) et transférées sur : {device}")
+        h5_content['tracings'] = torch.from_numpy(h5_content['tracings']).permute(0, 2, 1).contiguous().to(device)
 
     return h5_content, csv_data
 
@@ -126,7 +107,6 @@ def write_results(data_dict, csv, name, output_dir):
 
     with h5py.File(file_path, 'w') as f:
         for key, value in data_dict.items():
-
             # adaptation GPU -> CPU
             if torch.is_tensor(value):
                 value = value.cpu().numpy()
@@ -143,12 +123,10 @@ def write_results(data_dict, csv, name, output_dir):
         # On remplace l'extension .hdf5 par .csv pour le nom
         csv_name = name.replace(".hdf5", ".csv")
         csv_path = os.path.join(output_dir, csv_name)
-
         try:
             csv.to_csv(csv_path, index=False)
         except Exception as e:
             print(f"   [ERREUR] Échec écriture CSV: {e}")
-
 
 
 
@@ -158,278 +136,218 @@ def write_results(data_dict, csv, name, output_dir):
 """
 def get_active_boundaries(tracings, threshold=1e-6):
     """
-    Détecte les indices de fin d'activité (Time) pour chaque patient.
+    Détecte les indices de début et fin d'activité.
     
-    Optimisé pour le format (Batch, Channel, Time).
-    On réduit la dimension Channel pour voir si le signal est actif à l'instant t.
-
     Args:
-        tracings (torch.Tensor): Tenseur ECG.
-            Format attendu : (N, C, T) -> (Batch, Channels, Time).
-            Ex: (32, 12, 5000).
-        threshold (float): Seuil de silence (zéro machine).
-
+        tracings (torch.Tensor): (N, C, T)
+        threshold (float): Seuil d'activité.
     Returns:
-        tuple[torch.Tensor, torch.Tensor]:
-            - start_idx (N,): Indices de début (généralement 0).
-            - end_idx (N,): Indices de fin (dernier point non nul).
+        tuple[torch.Tensor, torch.Tensor]: start_idx, end_idx (N,)
     """
-    # 1. Sécurité Dimension
     if tracings.dim() == 2:
-        # Cas (C, T) -> (1, C, T)
         tracings = tracings.unsqueeze(0)
 
-    N, C, T = tracings.shape
+    # Masque booléen
+    is_active_time = tracings.abs().amax(dim=1) > threshold
 
-    # 2. Masque d'Activité Temporelle (Réduction des Canaux)
-    # On cherche le max absolu sur les canaux (dim 1) pour chaque instant t.
-    # Résultat : (N, T)
-    is_active_time = torch.amax(torch.abs(tracings), dim=1) > threshold
-
-    # 3. Start Index (Premier '1' sur l'axe temps)
     start_idx = is_active_time.int().argmax(dim=1)
 
-    # 4. End Index (Dernier '1' sur l'axe temps)
-    # On inverse l'axe temps
-    flipped_active = is_active_time.flip(dims=[1])
-    zeros_from_end = flipped_active.int().argmax(dim=1)
-    end_idx = T - zeros_from_end
+    tmp_flip = torch.flip(is_active_time, dims=[1])
+    last_active_from_end = tmp_flip.int().argmax(dim=1)
+    del tmp_flip 
 
-    # 5. Gestion des Signaux Vides (Flatlines)
-    # Si toute la ligne est False, argmax renvoie 0 -> end_idx = T (faux)
-    # On vérifie s'il y a au moins un True
-    has_any_signal = is_active_time.any(dim=1)
+    T = tracings.shape[2]
+    end_idx = T - last_active_from_end
 
-    start_idx = torch.where(has_any_signal, start_idx, torch.zeros_like(start_idx))
-    end_idx = torch.where(has_any_signal, end_idx, torch.zeros_like(end_idx))
+    # Correction pour les signaux totalement plats
+    has_signal = is_active_time.any(dim=1)
+    start_idx = torch.where(has_signal, start_idx, torch.zeros_like(start_idx))
+    end_idx   = torch.where(has_signal, end_idx, torch.zeros_like(end_idx))
 
+    del is_active_time, has_signal
     return start_idx, end_idx
+
 
 
 def re_sampling(data, csv, fo=400):
     """
-    Rééchantillonne les signaux ECG (N, C, T) vers une fréquence cible (fo).
-    
-    Spécificité :
-        - Travaille sur (Batch, Channel, Time).
-        - Coupe le padding inutile à la fin avant resampling.
-        - Utilise torchaudio (optimisé GPU).
+    Rééchantillonne les signaux ECG en les groupant par fréquence et longueur.
+
+    Le traitement par blocs "naturels" permet d'utiliser des opérations vectorisées
+    efficaces tout en contrôlant la consommation VRAM. La mémoire est libérée et le
+    cache CUDA est vidé après chaque bloc de fréquence.
 
     Args:
-        data (dict): {'tracings': Tensor(N, C, T) sur GPU, 'exam_id': ...}
-        csv (pd.DataFrame): Métadonnées ('exam_id', 'frequences').
-        fo (int): Fréquence cible.
+        data (dict): Dictionnaire contenant 'tracings' (Tensor GPU) et 'exam_id'.
+        csv (pd.DataFrame): Métadonnées contenant 'exam_id' et 'frequences'.
+        fo (int): Fréquence d'échantillonnage cible (ex: 400Hz).
 
     Returns:
-        torch.Tensor: (N, C, T_new) sur GPU.
+        torch.Tensor: Le nouveau tenseur rééchantillonné de forme (N, C, T_new).
     """
     tracings = data['tracings']
-    all_ids = data['exam_id']
-
-    N, C, T = tracings.shape
     device = tracings.device
+    N, C, T = tracings.shape
 
-    # 1. Détection de la longueur utile (Fin du signal)
-    # end_idxs correspond à l'index temporel max où il y a du signal
+    # Extraction des bornes d'activité
     _, end_idxs = get_active_boundaries(tracings)
-
-    # Transfert CPU pour mapping Pandas
     real_lengths = end_idxs.cpu().numpy()
 
-    # 2. Création des Maps (ID -> Info)
-    id_to_len = {}
-    id_to_idx = {}
+    # Mapping rapide des IDs pour retrouver les index dans le tenseur original
+    all_ids = [rid.decode('utf-8') if isinstance(rid, bytes) else str(rid) for rid in data['exam_id']]
+    id_to_idx = {rid: i for i, rid in enumerate(all_ids)}
 
-    for i in range(N):
-        raw_id = all_ids[i]
-        # Décodage robuste bytes/str
-        s_id = raw_id.decode('utf-8') if isinstance(raw_id, bytes) else str(raw_id)
+    # Calcul des longueurs cibles (target_len)
+    df = csv.copy()
+    df['exam_id'] = df['exam_id'].astype(str)
+    df['current_len'] = df['exam_id'].map(id_to_idx).map(lambda x: real_lengths[x] if pd.notnull(x) else 0)
 
-        id_to_len[s_id] = real_lengths[i]
-        id_to_idx[s_id] = i
+    max_target_len = int(np.ceil(df['current_len'] * fo / df['frequences']).max())
 
-    # 3. Préparation Dataframe (CPU)
-    # On travaille sur une copie pour ne pas toucher au CSV original
-    df_proc = csv.copy()
-    df_proc['exam_id'] = df_proc['exam_id'].astype(str)
-
-    # Mapping des longueurs réelles détectées sur le GPU
-    df_proc['current_len'] = df_proc['exam_id'].map(id_to_len)
-
-    # Filtrage : on ne garde que les IDs présents dans le batch GPU
-    df_valid = df_proc.dropna(subset=['current_len'])
-    df_valid['current_len'] = df_valid['current_len'].astype(int)
-
-    if df_valid.empty:
-        # Retourne un tenseur vide si aucune correspondance
-        return torch.zeros((N, C, 1), device=device)
-
-    # 4. Calcul taille cible
-    # T_new = ceil(T_old * fo / fs)
-    df_valid['target_len'] = np.ceil(
-        df_valid['current_len'] * fo / df_valid['frequences']
-    ).astype(int)
-
-    max_target_len = int(df_valid['target_len'].max())
-
-    # Allocation Tenseur Sortie (N, C, T_new)
-    # Initialisé à 0 (Padding implicite)
+    # Allocation du tenseur de destination sur le GPU
     new_tracings = torch.zeros((N, C, max_target_len), dtype=torch.float32, device=device)
 
-    # 5. Traitement par Groupe (Fréquence + Longueur)
-    # Cela permet de batcher le resampling
-    groups = df_valid.groupby(['frequences', 'current_len'])
+    resamplers = {}
+    # On itère par groupes homogènes
+    grouped = df.groupby(['frequences', 'current_len'])
 
-    for (fs_in, len_in), group in groups:
-        if len_in == 0: continue
+    for (fs_in, len_in), group in grouped:
+        if len_in <= 0: continue
 
-        # A. Récupération des indices batch
-        batch_ids = group['exam_id'].values
-        # On retrouve les index du tenseur GPU via la map
-        indices = [id_to_idx[bid] for bid in batch_ids if bid in id_to_idx]
+        # Sélection des indices appartenant à ce groupe
+        indices = [id_to_idx[bid] for bid in group['exam_id'] if bid in id_to_idx]
+        idx_tensor = torch.tensor(indices, device=device)
 
-        if not indices: continue
+        # sub_batch extrait une portion. On force .float() pour le calcul
+        sub_batch = tracings[idx_tensor, :, :len_in].float()
 
-        gpu_idx = torch.tensor(indices, device=device)
+        # Initialisation ou réutilisation du module Resample
+        if fs_in not in resamplers:
+            resamplers[fs_in] = torchaudio.transforms.Resample(
+                orig_freq=int(fs_in),
+                new_freq=int(fo),
+                resampling_method='sinc_interp_kaiser',
+                lowpass_filter_width=6,
+                rolloff=0.99
+            ).to(device)
 
-        # B. Slicing GPU (N, C, T) -> On coupe sur dim 2 (Time)
-        # On prend tous les indices du groupe, tous les canaux, jusqu'à len_in
-        sub_batch = tracings[gpu_idx, :, :len_in]
+        # Calcul du resampling
+        resampled = resamplers[fs_in](sub_batch)
 
-        # C. Resampling
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=fs_in,
-            new_freq=fo,
-            resampling_method='sinc_interp_kaiser',
-            lowpass_filter_width=6,
-            rolloff=0.99,
-            dtype=torch.float32
-        ).to(device)
+        # Libération de l'entrée du bloc immédiatement après calcul
+        del sub_batch 
 
-        resampled_sub = resampler(sub_batch)
+        # Transfert du résultat vers le tenseur final
+        L_target = resampled.shape[-1]
+        new_tracings[idx_tensor, :, :L_target] = resampled
 
-        # D. Placement dans le tenseur final
-        # On s'assure de ne pas dépasser la taille allouée (arrondi float)
-        current_t_new = resampled_sub.shape[-1]
-        limit = min(current_t_new, max_target_len)
+        # Nettoyage du bloc traité
+        del resampled, idx_tensor
+        # Force la libération de la mémoire fragmentée sur le GPU
+        torch.cuda.empty_cache() 
 
-        new_tracings[gpu_idx, :, :limit] = resampled_sub[:, :, :limit]
-
+    data['tracings'] = None 
+    del tracings
     return new_tracings
-
 
 
 
 """
     Méthode de la partie 2
 """
-def z_norm(tracings, eps=1e-5):
+# TODO faux, car à l'interieur du signal on peut avoir des 0, il faut slice la sous sequence plutot !
+def z_norm(chunk, eps=1e-5):
     """
-    Normalisation Z-Score (Mean=0, Std=1) par canal.
-    Adapté au format (N, C, T).
-
-    Calcule les stats uniquement sur la zone active (non-zéro) 
-    pour éviter que le padding ne les écrases.
+    Normalisation Z-score (Mean=0, Std=1) effectuée directement sur le tenseur fourni.
+    
+    Cette fonction est optimisée pour la mémoire:
+    1. Elle utilise des opérations "in-place" pour éviter les copies.
+    2. Elle ne crée qu'un seul tenseur temporaire de la taille du chunk pour la variance.
+    3. Elle convertit explicitement les compteurs en Float pour éviter les erreurs de cast.
 
     Args:
-        tracings (torch.Tensor): (N, C, T) sur GPU.
-        eps (float): Stabilité numérique.
+        chunk (torch.Tensor): Un tenseur PyTorch (Vue ou Copie) de forme (N, C, T).
+                             Modifié directement en place.
+        eps (float): Seuil de stabilité pour éviter la division par zéro et 
+                     définir la zone d'activité.
 
     Returns:
-        torch.Tensor: (N, C, T) normalisé.
+        torch.Tensor: Le même tenseur 'chunk' normalisé.
     """
-    N, C, T = tracings.shape
-    device = tracings.device
+    # On crée un masque booléen pour identifier le signal utile sur chaque canal indépendemment
+    mask = (chunk.abs() > eps)
 
-    # 1. Détection Active Zone (Par canal individuel)
-    is_nonzero = torch.abs(tracings) > eps      # (N, C, T)
+    # Calcul du nombre de points actifs par canal
+    count = mask.sum(dim=2, keepdim=True).float().clamp_(min=1.0)
 
-    # Start: Premier True sur l'axe T (dim 2)
-    starts = torch.argmax(is_nonzero.int(), dim=2)  # (N, C)
+    # On calcule la somme pondérée par le masque
+    mean = torch.sum(chunk * mask, dim=2, keepdim=True).div_(count)
 
-    # End: Dernier True sur l'axe T (dim 2)
-    flipped = is_nonzero.flip(dims=[2])
-    ends_from_back = torch.argmax(flipped.int(), dim=2)
-    ends = T - ends_from_back # (N, C)
+    #  Calcul de la Variance
+    res = chunk.sub(mean) 
 
-    # 2. Création Masque 3D
-    # Grid temporelle : (1, 1, T)
-    grid = torch.arange(T, device=device).view(1, 1, T)
+    # Elévation au carré et application du masque in-place
+    res.pow_(2).mul_(mask)
 
-    # Bornes : (N, C, 1) pour comparer avec la grid (T)
-    starts_bc = starts.unsqueeze(-1) 
-    ends_bc = ends.unsqueeze(-1)
+    std = res.sum(dim=2, keepdim=True).div_(count).sqrt_().clamp_(min=eps)
 
-    # Masque float (1.0 = Signal, 0.0 = Padding)
-    active_mask = ((grid >= starts_bc) & (grid < ends_bc)).float()
+    # Libèration de la mémoire de travail
+    del res 
 
-    # 3. Calcul Stats Pondérées (Sur dim 2 = Time)
-    # Compte le nombre de points réels par canal
-    count = active_mask.sum(dim=2, keepdim=True) # (N, C, 1)
-    count = count.clamp(min=1.0) # Évite div/0
+    # Normalisation finale In-Place
+    chunk.sub_(mean)
+    chunk.div_(std)
+    chunk.mul_(mask)
 
-    # Moyenne
-    sum_val = (tracings * active_mask).sum(dim=2, keepdim=True)
-    means = sum_val / count
+    # Nettoyage des petits tenseurs intermédiaires
+    del mask, mean, std, count
+    
+    return chunk
 
-    # Variance / Std
-    # On centre, on masque le padding (qui devient 0), on met au carré
-    diff = (tracings - means) * active_mask
-    sq_diff = diff.pow(2)
-    vars_ = sq_diff.sum(dim=2, keepdim=True) / count
-    stds = torch.sqrt(vars_)
-
-    # Sécurité signal plat
-    stds = torch.clamp(stds, min=eps)
-
-    # 4. Normalisation
-    # (X - mu) / sigma
-    # On ré-applique le masque à la fin pour garantir que le padding reste un vrai 0 absolu
-    data_norm = ((tracings - means) / stds) * active_mask
-
-    return data_norm
 
 
 def add_bilateral_padding(tracings, target_size):
     """
     Centre le signal actif dans une fenêtre de taille target_size.
+    Version vectorisée, mémoire-friendly.
 
     Args:
         tracings (torch.Tensor): (N, C, T) ou (C, T).
         target_size (int): Taille cible.
 
     Returns:
-        torch.Tensor: (N, C, target_size) paddé.
+        tuple:
+            - torch.Tensor: (N, C, target_size) paddé avec signal centré.
+            - torch.Tensor: (N,) longueurs originales des signaux actifs.
     """
-    # Sécurité Dimension
+    # Sécurité des dimensions
     if tracings.dim() == 2:
-        tracings = tracings.unsqueeze(0)
+        tracings = tracings.unsqueeze(0)  # (1, C, T)
 
-    N, C, _ = tracings.shape
+    N, C, T = tracings.shape
+    device = tracings.device
 
-    # Récupération des bornes actives
-    # start_idxs et end_idxs sont des tenseurs de taille (N,)
-    start_idxs, end_idxs = get_active_boundaries(tracings)
+    # Détection des bornes actives
+    start_idxs, end_idxs = get_active_boundaries(tracings)  # (N,), (N,)
+    lengths = end_idxs - start_idxs  # (N,)
 
-    # 3. Calculs Vectorisés (Préparation)
-    lengths = end_idxs - start_idxs                 # (N,)
-    offsets = (target_size - lengths).div(2, rounding_mode='floor') # (N,)
+    # Offset pour centrer
+    offsets = ((target_size - lengths) // 2).clamp(min=0)  # (N,)
 
-    # 4. Création du conteneur
-    new_tracing = torch.zeros((N, C, target_size), dtype=tracings.dtype, device=tracings.device)
+    # Préparer le tensor de sortie
+    new_tracing = torch.zeros((N, C, target_size), dtype=tracings.dtype, device=device)
 
-    # 5. Injection du signal
-    for i in range(N):
-        l = lengths[i].item()
+    # 4) Injection vectorisée
+    # On filtre les signaux valides
+    valid = lengths > 0
+    if valid.any():
+        idxs = torch.arange(N, device=device)[valid]
+        for i in idxs:
+            l = lengths[i].item()
+            o = offsets[i].item()
+            s = start_idxs[i].item()
+            e = end_idxs[i].item()
 
-        # Sécurité pour les signaux vides
-        if l <= 0:
-            continue
-
-        o = offsets[i].item()
-        s = start_idxs[i].item()
-        e = end_idxs[i].item()
-
-        new_tracing[i, :, o : o + l] = tracings[i, :, s : e]
+            new_tracing[i, :, o:o+l] = tracings[i, :, s:e]
 
     return new_tracing, lengths
