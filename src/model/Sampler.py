@@ -12,7 +12,7 @@ class MegaBatchSortishSampler(Sampler):
     3. Trie ce Mega-Batch par longueur de séquence.
     4. Découpe ce Mega-Batch trié en mini-batches finaux.
     """
-    def __init__(self, dataset, batch_size, mega_batch_factor=50, shuffle=True):
+    def __init__(self, dataset, batch_size, mega_batch_factor=20, shuffle=True):
         """
         La carte des longueurs (lengths) : Il doit savoir que l'indice 50 dure 3000 points et l'indice 51 dure 4500 points.
         C'est pour cela qu'on lui passe le Dataset.
@@ -22,7 +22,7 @@ class MegaBatchSortishSampler(Sampler):
         mega_batch_factor (50) : Pour savoir quelle taille de l'ensemble d'indices il doit mélanger avant de trier.
 
         Args:
-            dataset (Dataset): Ton dataset (doit avoir un moyen d'accéder à la longueur).
+            dataset (Dataset): Ton dataset (doit avoir un moyen d'accéder à la longueur) plutot bas en train et long en eval.
             batch_size (int): La taille finale du batch pour le GPU.
             mega_batch_factor (int): Combien de batches on pré-charge pour le tri (défaut 50).
             shuffle (bool): True pour l'entrainement (mélange global), False pour la val.
