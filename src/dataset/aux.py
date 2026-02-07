@@ -110,25 +110,34 @@ def load(path, use_csv=True, to_gpu=True):
 def write_results(data_dict, name, output_dir):
     """
     Sauvegarde le contenu d'un dictionnaire dans un fichier HDF5.
-
-    Cette fonction crée un nouveau fichier HDF5 dans le répertoire spécifié.
-    Chaque entrée du dictionnaire est enregistrée comme un 'dataset' distinct
-    à la racine du fichier.
+    Adapte automatiquement les Tenseurs GPU vers CPU/Numpy.
 
     Args:
-        data_dict (dict): Dictionnaire contenant les données.
-                          - Clés (str) : Noms des datasets HDF5.
-                          - Valeurs (array-like) : Données (numpy arrays, listes) à stocker.
-        name (str): Le nom du fichier de sortie (ex: 'resultat.hdf5').
-        output_dir (str): Le chemin du répertoire de destination.
+        data_dict (dict): Données (Clé -> Tensor GPU ou List ou Numpy).
+        name (str): Nom fichier (ex: 'clean_data.hdf5').
+        output_dir (str): Dossier cible.
     """
+    # Création du dossier si inexistant
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     file_path = os.path.join(output_dir, name)
+    print(f"[SAVE] Écriture dans : {file_path}")
 
     with h5py.File(file_path, 'w') as f:
-        # On parcourt le dictionnaire pour tout écrire
         for key, value in data_dict.items():
-            f.create_dataset(key, data=value)
 
+            # adaptation GPU -> CPU
+            if torch.is_tensor(value):
+                value = value.cpu().numpy()
+
+            # Écriture
+            try:
+                f.create_dataset(key, data=value)
+                shape_str = str(value.shape) if hasattr(value, 'shape') else str(len(value))
+                print(f"   -> Dataset '{key}' sauvegardé. Shape: {shape_str}")
+            except Exception as e:
+                print(f"   [ERREUR] Échec écriture '{key}': {e}")
 
 
 """
