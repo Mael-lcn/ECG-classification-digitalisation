@@ -280,7 +280,7 @@ def main():
     parser.add_argument('--class_map', default='../../ressources/final_class.json', help="JSON ordered class list")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--threshold', type=float, default=0.5) # may be optimized later
+    parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('-o', '--output', type=str, default="output/evaluation")
     parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-2)
 
@@ -333,7 +333,7 @@ def main():
     challenge = compute_challenge_metric(
         # uses the specific "Sinus Rhythm" (NSR) baseline to see if the model is actually learning 
         # heart pathologies or just guessing the most common class
-        weights, labels, binary, classes, "NSR") 
+        weights, labels, binary, classes, "NSR") # normal ecg
 
     print('Done.')
 
