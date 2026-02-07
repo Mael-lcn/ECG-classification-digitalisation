@@ -24,6 +24,7 @@ def worker1(couple, output):
     name, path = couple
 
     dataset, csv = load(path)
+
     time_serries_norm = re_sampling(dataset, csv)
     dataset['tracings'] = z_norm(time_serries_norm)
 
@@ -44,6 +45,7 @@ def worker2(couple, output):
     name, path = couple
 
     dataset, _ = load(path, use_csv=False)
+    csv = csv.rename(columns={"normal_ecg": "NSR"})
     dataset['tracings'] = z_norm(dataset['tracings'])
 
     write_results(dataset, name, output)
