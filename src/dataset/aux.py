@@ -375,3 +375,22 @@ def z_norm(tracings, eps=1e-5):
     data_norm = ((tracings - means) / stds) * active_mask
 
     return data_norm
+
+
+
+def add_bilateral_padding(tracings, size):
+    """
+    Ajoute le padding de manière équi-égal sur la gouche et la droite et slice le signal à l'intérieur
+
+    Args:
+        tracings (torch.Tensor): (N, C, T) sur GPU.
+        size (int): taille total du padding a jouté.
+
+    Returns:
+        torch.Tensor: (N, C, T) normalisé.
+    """
+    # 1. récupère le signal utile
+
+    # 2. ajoute le padding
+
+    # 3. retourne le nouveau tenseur
