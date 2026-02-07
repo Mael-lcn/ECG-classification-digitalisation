@@ -115,7 +115,7 @@ class LargeH5Dataset(Dataset):
         # B. Gestion des ressources (Fichiers)
         # Si le fichier demandé n'est pas celui actuellement ouvert, on change de fichier
         if self.current_file_idx != file_idx:
-            self._load_new_file_resources(file_idx)
+            self.load_new_file_resources(file_idx)
 
         # C. Lecture des données brutes
         tracing_data = self.file_handle['tracings'][local_idx]
@@ -140,7 +140,7 @@ class LargeH5Dataset(Dataset):
         return tracing_tensor, label_tensor
 
 
-    def _load_new_file_resources(self, file_idx):
+    def load_new_file_resources(self, file_idx):
         """
         Méthode interne pour gérer la transition entre deux fichiers.
         Ferme les ressources précédentes et charge les nouvelles métadonnées en RAM.

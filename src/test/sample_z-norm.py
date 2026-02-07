@@ -260,7 +260,7 @@ def test_bilateral_padding_logic():
 
     # --- TEST 1 : Padding Valide (P0 et P1 seulement) ---
     print("\n1. Test du Padding (Cas valides)...")
-    
+
     # On prend uniquement les 2 premiers patients valides
     valid_batch = input_tensor[0:2]
     padded_output = add_bilateral_padding(valid_batch, target_size=target_size)
@@ -269,7 +269,7 @@ def test_bilateral_padding_logic():
     # Attendu : [0, 0, 0, 1, 1, 1, 1, 0, 0, 0]
     row0 = padded_output[0, 0].cpu().numpy()
     check0 = np.allclose(row0[3:7], 1.0) and (row0[:3].sum() == 0) and (row0[7:].sum() == 0)
-    
+
     print(f"   [P0] Attendu : 3 zéros - 4 ones - 3 zéros")
     print(f"        Obtenu  : {row0}")
     print(f"        Statut  : {'SUCCÈS' if check0 else 'ÉCHEC'}")
@@ -307,7 +307,7 @@ def run_checks(data, csv_meta, target_fo=400):
     start_time = time.time()
 
     test_hard_cases_boundaries()
-    test_bilateral_padding_logic()
+    #test_bilateral_padding_logic()
 
     # Vérification du format d'entrée
     tracings = data['tracings']

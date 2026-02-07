@@ -19,8 +19,8 @@ MAX_TEMPS = 144
 MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 
-# Limite de sécurité VRAM (en Go). Le GPU fait environ 10Go, on réserve 2Go pour le système/overhead
-VRAM_LIMIT_GB = 9.0 
+# Limite de sécurité VRAM (en Go). Le GPU fait environ 9.6, on réserve 1Go pour le système/overhead
+VRAM_LIMIT_GB = 8.6 
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
@@ -129,7 +129,32 @@ def unified_worker(task, output):
         del tracings
         torch.cuda.empty_cache()
 
-        # Fusion des morceaux
+        # Cherche l'axe T le plus long dans les reuslats
+        all_t_sizes = [c.shape[2] for c in processed_chunks]
+        max_t = max(all_t_sizes)
+
+        # Pad les signaux pour etre homogène sur T
+        for i in range(len(processed_chunks)):
+            current_t = processed_chunks[i].shape[2]
+
+            if current_t < max_t:
+                # Calcul de la différence manquante
+                diff = max_t - current_t
+                N_chunk, C, _ = processed_chunks[i].shape
+
+                # Création du "patch" de zéros sur le même device (GPU)
+                padding_patch = torch.zeros((N_chunk, C, diff), 
+                                        device=processed_chunks[i].device, 
+                                        dtype=processed_chunks[i].dtype)
+
+                # On allonge le chunk sur la dimension 2 (le temps)
+                # On remplace l'élément dans la liste par sa version rallongée
+                processed_chunks[i] = torch.cat([processed_chunks[i], padding_patch], dim=2)
+
+                # Nettoyage immédiat du patch
+                del padding_patch
+
+        # Fusion finale
         dataset['tracings'] = torch.cat(processed_chunks, dim=0)
         del processed_chunks
 

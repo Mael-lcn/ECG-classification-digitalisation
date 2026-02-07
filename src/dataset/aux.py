@@ -218,8 +218,8 @@ def re_sampling(data, csv, fo=400):
         indices = [id_to_idx[bid] for bid in group['exam_id'] if bid in id_to_idx]
         idx_tensor = torch.tensor(indices, device=device)
 
-        # sub_batch extrait une portion. On force .float() pour le calcul
-        sub_batch = tracings[idx_tensor, :, :len_in].float()
+        # sub_batch extrait une portion
+        sub_batch = tracings[idx_tensor, :, :len_in]
 
         # Initialisation ou réutilisation du module Resample
         if fs_in not in resamplers:
@@ -255,7 +255,6 @@ def re_sampling(data, csv, fo=400):
 """
     Méthode de la partie 2
 """
-# TODO faux, car à l'interieur du signal on peut avoir des 0, il faut slice la sous sequence plutot !
 def z_norm(chunk, eps=1e-5):
     """
     Normalisation Z-score (Mean=0, Std=1) effectuée directement sur le tenseur fourni.
@@ -274,34 +273,40 @@ def z_norm(chunk, eps=1e-5):
     Returns:
         torch.Tensor: Le même tenseur 'chunk' normalisé.
     """
-    # On crée un masque booléen pour identifier le signal utile sur chaque canal indépendemment
-    mask = (chunk.abs() > eps)
+    _, _, T = chunk.shape
+    device = chunk.device
 
-    # Calcul du nombre de points actifs par canal
-    count = mask.sum(dim=2, keepdim=True).float().clamp_(min=1.0)
+    # Détection Start/Stop par canal
+    is_active = (chunk.abs() > eps)
 
-    # On calcule la somme pondérée par le masque
-    mean = torch.sum(chunk * mask, dim=2, keepdim=True).div_(count)
+    # Premier index non-nul
+    start_indices = is_active.int().argmax(dim=2).unsqueeze(-1) # (N, C, 1)
 
-    #  Calcul de la Variance
-    res = chunk.sub(mean) 
+    # Dernier index non-nul
+    flipped_active = is_active.flip(dims=[2])
+    end_indices = (T - flipped_active.int().argmax(dim=2)).unsqueeze(-1) # (N, C, 1)
+    del flipped_active
 
-    # Elévation au carré et application du masque in-place
-    res.pow_(2).mul_(mask)
+    # Création du masque temporel
+    t_grid = torch.arange(T, device=device).view(1, 1, T)
 
+    # window_mask est True uniquement entre start et end pour chaque canal
+    window_mask = (t_grid >= start_indices) & (t_grid < end_indices)
+
+    # Calculs statistiques
+    count = window_mask.sum(dim=2, keepdim=True).float().clamp_(min=1.0)
+
+    # Somme du signal
+    mean = torch.sum(chunk * window_mask, dim=2, keepdim=True).div_(count)
+
+    # Variance (x - mu)^2
+    res = chunk.sub(mean).pow_(2).mul_(window_mask)
     std = res.sum(dim=2, keepdim=True).div_(count).sqrt_().clamp_(min=eps)
+    del res
 
-    # Libèration de la mémoire de travail
-    del res 
+    # Application In-Place
+    chunk.sub_(mean).div_(std).mul_(window_mask)
 
-    # Normalisation finale In-Place
-    chunk.sub_(mean)
-    chunk.div_(std)
-    chunk.mul_(mask)
-
-    # Nettoyage des petits tenseurs intermédiaires
-    del mask, mean, std, count
-    
     return chunk
 
 
