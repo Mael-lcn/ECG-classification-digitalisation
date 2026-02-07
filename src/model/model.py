@@ -11,7 +11,8 @@ class CNN(nn.Module):
         ch2: int = 64,
         ch3: int = 128,
         kernel_size: int = 7, 
-        dropout: float = 0.5
+        dropout: float = 0.5,
+        use_batchnorm: bool = True
     ):
         """
         Simple 3-layer 1D CNN for ECG classification
@@ -22,27 +23,30 @@ class CNN(nn.Module):
             ch1, ch2, ch3: Number of channels in conv layers
             kernel_size: Conv kernel size (for now same for all layers cuz 400Hz, might tune later)
             dropout: Dropout probability
+            use_batchnorm: Boolean flag to activate or desactivate the usage of batch norm.
         """
         super().__init__()
         
         padding = kernel_size // 2
 
-        # 1st conv layer
+        # Convolutional layers
         self.conv1 = nn.Conv1d(in_channels, ch1, kernel_size, padding=padding)
-        self.bn1 = nn.BatchNorm1d(ch1)
-        self.pool1 = nn.MaxPool1d(2) # Downsample to capture larger rhythm patterns
-
-        # 2nd conv layer
         self.conv2 = nn.Conv1d(ch1, ch2, kernel_size, padding=padding)
-        self.bn2 = nn.BatchNorm1d(ch2)
-        self.pool2 = nn.MaxPool1d(2)
-
-        # 3rd conv layer
         self.conv3 = nn.Conv1d(ch2, ch3, kernel_size, padding=padding)
-        self.bn3 = nn.BatchNorm1d(ch3)
-        # We don't necessarily need a 3rd max pool if the signal's length is not too long,
-        # but it helps increase the receptive field.
 
+        # Batch Norm layers
+        # nn.Identity() -> no operation
+        self.bn1 = nn.BatchNorm1d(ch1) if use_batchnorm else nn.Identity()
+        self.bn2 = nn.BatchNorm1d(ch2) if use_batchnorm else nn.Identity()
+        self.bn3 = nn.BatchNorm1d(ch3) if use_batchnorm else nn.Identity()
+
+        # Pooling layers: Downsample to capture larger rhythm patterns
+        self.pool1 = nn.MaxPool1d(2)
+        self.pool2 = nn.MaxPool1d(2) # Downsample to capture larger rhythm patterns
+        # Note: we don't necessarily need a 3rd max pool if the signal's length is not too 
+        # long, but it helps increase the receptive field.
+
+        # Drop out layer
         self.dropout = nn.Dropout(dropout)
 
         # Global Average Pooling: Redundant for fixed length but excellent for 
@@ -77,3 +81,4 @@ class CNN(nn.Module):
 
         x = self.fc(x) # (batch, num_classes)
         return x
+    
