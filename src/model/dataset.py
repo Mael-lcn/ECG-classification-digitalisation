@@ -31,7 +31,7 @@ class LargeH5Dataset(Dataset):
         total_length (int): Nombre total d'échantillons disponibles.
     """
 
-    def __init__(self, input_dir: str, classes_list: list):
+    def __init__(self, input_dir, classes_list):
         """
         Initialise le dataset en scannant le répertoire cible.
 
@@ -42,7 +42,7 @@ class LargeH5Dataset(Dataset):
         """
         self.classes = classes_list
         self.num_classes = len(classes_list)
-        
+
         # Ces variables servent à garder le fichier courant ouvert
         self.file_handle = None          # Pointeur vers le fichier H5 ouvert
         self.current_file_idx = -1       # Index du fichier actuellement ouvert
@@ -87,12 +87,12 @@ class LargeH5Dataset(Dataset):
         print(f"Dataset prêt : {self.total_length} échantillons au total.")
 
 
-    def __len__(self) -> int:
+    def __len__(self):
         """Retourne la taille totale du dataset (tous fichiers confondus)."""
         return self.total_length
 
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx):
         """
         Récupère un échantillon et son label correspondant.
 
@@ -104,7 +104,7 @@ class LargeH5Dataset(Dataset):
                 - tracing_tensor (torch.Tensor): Forme (12, Time), type Float.
                 - label_tensor (torch.Tensor): Forme (Num_Classes,), type Float (Multi-hot/One-hot).
         """
-        # --- A. Localisation de la donnée ---
+        # A. Localisation de la donnée
         file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
 
         # Calcul de l'index local (offset) à l'intérieur de ce fichier spécifique
@@ -113,27 +113,27 @@ class LargeH5Dataset(Dataset):
         else:
             local_idx = idx - self.cumulative_sizes[file_idx - 1]
 
-        # --- B. Gestion des ressources (Fichiers) ---
-        # Si le fichier demandé n'est pas celui actuellement ouvert, on change de fichier.
+        # B. Gestion des ressources (Fichiers)
+        # Si le fichier demandé n'est pas celui actuellement ouvert, on change de fichier
         if self.current_file_idx != file_idx:
             self._load_new_file_resources(file_idx)
 
-        # --- C. Lecture des données brutes ---
+        # C. Lecture des données brutes
         tracing_data = self.file_handle['tracings'][local_idx]
         raw_id = self.file_handle['exam_id'][local_idx]
 
-        # --- D. Traitement de l'ID ---
+        # D. Traitement de l'ID
         if hasattr(raw_id, 'decode'):
             exam_id_str = raw_id.decode('utf-8')
         else:
             # Sinon (c'est un int, un float, ou déjà une str), on convertit simplement en string
             exam_id_str = str(raw_id)
 
-        # --- E. Récupération du Label ---
+        # E. Récupération du Label
         # O(1) : On pioche dans le dictionnaire pré-chargé en mémoire
         label_vec = self.current_labels_map.get(exam_id_str)
 
-        # --- F. Conversion en Tensors PyTorch ---
+        # F. Conversion en Tensors PyTorch
         # Transpose : Les modèles Conv1D attendent (Batch, Channels, Time)
         tracing_tensor = torch.from_numpy(tracing_data).float().transpose(0, 1)
         label_tensor = torch.from_numpy(label_vec).float()
@@ -184,4 +184,4 @@ class LargeH5Dataset(Dataset):
             try:
                 self.file_handle.close()
             except Exception:
-                pass # Évite de lever une erreur lors de l'arrêt du programme
+                pass    # Évite de lever une erreur lors de l'arrêt du programme

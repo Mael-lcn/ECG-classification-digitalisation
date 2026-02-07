@@ -1,139 +1,154 @@
 import os
 import argparse
 import time
+import gc
+import torch
+import random
+import threading
 from tqdm import tqdm
-
 from functools import partial
-import multiprocessing
+from multiprocessing.pool import ThreadPool
 
 from aux import *
 
 
 
-def worker1(couple, output):
+# --- CONFIGURATION GLOBALE ---
+TARGET_FREQ = 400
+MAX_TEMPS = 144
+MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
+
+
+# Limite de sécurité VRAM (en Go). Le GPU fait environ 10Go, on réserve 2Go pour le système/overhead
+VRAM_LIMIT_GB = 8.0 
+current_vram_usage = 0.0
+vram_lock = threading.Condition()
+
+
+def estimate_vram_gb(path_h5):
     """
-    Orchestre la pipeline du traitement pour un hdf5 : 
-    Chargement -> Rééchantillonnage (avec CSV) -> Normalisation -> Sauvegarde.
-
-    Args:
-        couple (tuple): Un tuple (filename, (path_h5, path_csv)).
-                        - filename (str): Le nom du fichier de sortie (ex: 'patient_01.hdf5').
-                        - (path_h5, path_csv) : Les chemins complets vers les fichiers sources.
-        output (str): Le chemin du répertoire où sauvegarder le fichier HDF5 traité.
+    Estime la mémoire nécessaire pour un file.
     """
-    name, path = couple
+    try:
+        with h5py.File(path_h5, 'r') as f:
+            shape = f['tracings'].shape
+            # N * C * T * 4 bytes / 1024^3
+            size_gb = (torch.tensor(shape).prod().item() * 4) / (1024**3)
+            # Facteur 4 car resampling + z-norm créent des copies temporaires
+            return max(size_gb * 2, 0.2)
+    except:
+        return 0.5
 
-    dataset, csv = load(path)
-    time_serries_norm = re_sampling(dataset, csv)
-    dataset['tracings'] = z_norm(time_serries_norm)
 
-    write_results(dataset, name, output)
-
-
-def worker2(couple, output):
+def unified_worker(task, output):
     """
-    Orchestre une pipeline simplifié : Chargement -> Normalisation -> Sauvegarde.
-
-    Ce worker ignore l'étape de rééchantillonnage et le fichier CSV.
-    Il est utile si les données sont déjà à la bonne fréquence ou si le CSV est absent.
-
-    Args:
-        couple (tuple): Un tuple (filename, (path_h5, path_csv)).
-        output (str): Le chemin du répertoire de sortie.
+    Worker polyvalent avec gestion dynamique de l'admission GPU.
     """
-    name, path = couple
+    global current_vram_usage
+    mode, name, path = task
+    path_h5 = path[0]
 
-    dataset, _ = load(path, use_csv=False)
-    dataset['tracings'] = z_norm(dataset['tracings'])
+    # 1. Estimation du coût VRAM
+    cost = estimate_vram_gb(path_h5)
+    print("QUEUE", f"{name} | mode={mode} | estimated={cost:.2f} GB")
 
-    write_results(dataset, name, output)
 
+    # 2. Admission contrôlée
+    with vram_lock:
+        while current_vram_usage + cost > VRAM_LIMIT_GB:
+            vram_lock.wait()    # Attend qu'un autre thread libère de la place
+        current_vram_usage += cost
+
+    print("START"f"{name} | allocated={cost:.2f} GB | "f"total={current_vram_usage:.2f}/{VRAM_LIMIT_GB} GB")
+
+    dataset, csv = None, None
+    try:
+        # 3. Pipeline de traitement
+        dataset, csv = load(path, use_csv=True, to_gpu=True)
+
+        if mode == 'D1':
+            dataset['tracings'] = re_sampling(dataset, csv, fo=TARGET_FREQ)
+            csv['frequences'] = TARGET_FREQ
+        else:
+            # Dataset 2 : Normalisation simple
+            if csv is not None and "normal_ecg" in csv.columns:
+                csv = csv.rename(columns={"normal_ecg": "NSR"})
+
+        dataset['tracings'] = z_norm(dataset['tracings'])
+        dataset['tracings'], lengths = add_bilateral_padding(dataset['tracings'], MAX_SIGNAL_LENGTH)
+        csv['length'] = lengths     # Créer une colonne avec la lg utile du signal pour la suite
+
+        write_results(dataset, csv, name, output)
+
+    except Exception as e:
+        print(f"\n[Erreur] {name} ({mode}) : {e}")
+    finally:
+        # Libération de la mémoire et du budget
+        if dataset is not None: del dataset
+        if csv is not None: del csv
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        with vram_lock:
+            current_vram_usage -= cost
+            vram_lock.notify_all()  # Réveille les threads en attente
 
 
 def run(args):
     """
-    Fonction principale d'orchestration de la pipeline de prétraitement.
-
-    Elle gère le flux de travail en deux étapes distinctes :
-    1. Traitement du Dataset 1 : Resampling + Normalisation (via worker1).
-    2. Traitement du Dataset 2 : Normalisation simple (via worker2).
-
-    Elle utilise le multiprocessing pour paralléliser les tâches sur les fichiers.
-
-    Args:
-        args (argparse.Namespace): Les arguments de la ligne de commande contenant :
-            - args.dataset1 : Chemin source Dataset 1.
-            - args.dataset2 : Chemin source Dataset 2.
-            - args.output : Dossier de sortie.
-            - args.workers : Nombre de processus parallèles.
+    Orchestre le traitement global en mélangeant les datasets pour une efficacité maximale.
     """
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
 
-    print("Récolte des données")
+    # 1. Collecte et étiquetage des tâches
+    print("Indexation des fichiers...")
+    all_tasks = []
 
-    patch_dict1 = collect_files(args.dataset1)
+    d1_files = collect_files(args.dataset1)
+    for name, path in d1_files.items():
+        all_tasks.append(('D1', name, path))
 
-    # Vérifie que des données ont été récoltés
-    if not patch_dict1:
-        print("Erreur: aucune données trouvé dans dataset1")
+    d2_files = collect_files(args.dataset2)
+    for name, path in d2_files.items():
+        all_tasks.append(('D2', name, path))
+
+    if not all_tasks:
+        print("Aucun fichier trouvé.")
         return
 
-    patch_items1 = list(patch_dict1.items())
-    pool_worker = partial(worker1, output=args.output)
+    # 2. Mélange aléatoire
+    # Permet de lisser la charge GPU en mixant gros fichiers (D1) et petits (D2)
+    random.shuffle(all_tasks)
 
-    print("Début de la normalisation du dataset1 vers le model du dataset2")
+    print(f"Traitement de {len(all_tasks)} fichiers avec {args.workers} threads.")
+    print(f"Gestion dynamique de la VRAM (Limite: {VRAM_LIMIT_GB} GB).")
 
+    # 3. Exécution parallèle
+    # car le verrou VRAM empêchera le GPU d'exploser
+    worker_func = partial(unified_worker, output=args.output)
 
-    # ---- Partie 1 uniquement sur dataset 1 -----------
-    # normalise le dataset 1 pour qu'il correspondent au dataset 2
-    with multiprocessing.get_context('spawn').Pool(args.workers) as pool:
-        for _ in tqdm(pool.imap_unordered(pool_worker, patch_items1),
-                                        total=len(patch_items1),
-                                        desc='Preprocessing'):
-            pass
-
-
-    print("Normalisation du dataset2")
-
-
-    # ---- Partie 2 uniquement sur dataset 2 -----------
-    patch_dict = collect_files(args.dataset2)
-
-    # Vérifie que des données ont été récoltés
-    if not patch_dict:
-        print("Erreur: aucune données trouvé pour dataset 2")
-        return
-
-    patch_items = list(patch_dict.items())
-    pool_worker = partial(worker2, output=args.output)
-
-    with multiprocessing.get_context('spawn').Pool(args.workers) as pool:
-        for _ in tqdm(pool.imap_unordered(pool_worker, patch_items),
-                                        total=len(patch_items),
-                                        desc='Preprocessing'):
-            pass
-
+    with ThreadPool(args.workers) as pool:
+        list(tqdm(pool.imap_unordered(worker_func, all_tasks), 
+                  total=len(all_tasks), 
+                  desc='Global Preprocessing'))
 
     elapsed = time.time() - start_time
-    minutes = int(elapsed // 60)
-    seconds = int(elapsed % 60)
-    print(f"Completed in {minutes} minutes and {seconds} seconds")
+    print(f"\nPipeline terminée en {int(elapsed // 60)}m {int(elapsed % 60)}s.")
 
 
 
 def main():
-    """
-    Point d'entrée du script. 
-    Parse les arguments de la ligne de commande et lance la fonction run.
-    """
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Pipeline ECG Mixte avec Budget VRAM")
     parser.add_argument('-d1', '--dataset1', type=str, default='../output/dataset1/')
     parser.add_argument('-d2', '--dataset2', type=str, default='../../../data/15_prct/')
     parser.add_argument('-o', '--output', type=str, default='../output/normalize_data')
-    parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
+    parser.add_argument('-w', '--workers', type=int, default=8, help="Nb de threads (I/O)")
 
     args = parser.parse_args()
+
+    # Config PyTorch pour éviter la fragmentation CUDA
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
     run(args)
 
