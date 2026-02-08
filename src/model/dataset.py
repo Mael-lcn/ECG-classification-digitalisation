@@ -6,6 +6,7 @@ from torch.utils.data import Dataset
 import bisect
 import pandas as pd
 import numpy as np
+from torch.nn.utils.rnn import pad_sequence
 
 
 
@@ -189,3 +190,41 @@ class LargeH5Dataset(Dataset):
                 self.file_handle.close()
             except Exception:
                 pass    # Évite de lever une erreur lors de l'arrêt du programme
+
+
+
+
+def ecg_collate_fn(batch):
+    """
+    Regroupe des ECG de longueurs variables dans un tenseur unique (Batch).
+    
+    Cette fonction est appelée par le DataLoader pour transformer la liste de
+    tuples extraits du Dataset en deux tenseurs exploitables par le GPU.
+    Elle gère le padding dynamique : chaque batch aura la longueur de son
+    élément le plus long.
+
+    Args:
+        batch (list): Liste de tuples [(signal, label), ...] 
+                      - signal: torch.Tensor de forme (12, T)
+                      - label: torch.Tensor de forme (NumClasses,)
+
+    Returns:
+        tuple: (padded_signals, stacked_labels)
+               - padded_signals: torch.Tensor (Batch, 12, Max_T_du_batch)
+               - stacked_labels: torch.Tensor (Batch, NumClasses)
+    """
+    # Extraction des signaux et des labels
+    # On transpose chaque signal de (12, T) à (T, 12) pour que pad_sequence qui pad que la 1er dim 
+    signals = [item[0].T for item in batch]
+    labels = [item[1] for item in batch]
+
+    # Application du padding
+    padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)    # Résultat : (Batch, Max_T, 12)
+
+    # Remise en forme standard (Batch, Channels, Time)
+    padded_signals = padded_batch.transpose(1, 2)
+
+    # Empilage des labels (Taille fixe, donc un simple stack suffit)
+    stacked_labels = torch.stack(labels)
+
+    return padded_signals, stacked_labels

@@ -11,11 +11,12 @@ from tqdm import tqdm
 import wandb  # Librairie de monitoring
 
 from torch.utils.data import DataLoader
-from dataset import LargeH5Dataset 
+from dataset import LargeH5Dataset, ecg_collate_fn
 from model import CNN 
+from Sampler import MegaBatchSortishSampler
 
 
-
+# TODO ajouter la méthode pour opti le forward sur big batch
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
     """
     Exécute une époque d'entraînement complète (Forward + Backward pass).
@@ -153,21 +154,26 @@ def run(args):
     train_ds = LargeH5Dataset(input_dir=args.train_data, classes_list=loaded_classes)
     val_ds = LargeH5Dataset(input_dir=args.val_data, classes_list=loaded_classes)
 
-    # Dataloader
+    # Sampler
+    train_sampler = MegaBatchSortishSampler(train_ds, batch_size=args.batch_size, shuffle=True)
+    val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
+
+    # Dataloader de Training
     train_loader = DataLoader(
         dataset=train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,          
+        collate_fn=ecg_collate_fn,
+        batch_sampler=train_sampler,
         num_workers=args.workers,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2 
     )
 
+    # Dataloader de Validation
     val_loader = DataLoader(
         dataset=val_ds,
-        batch_size=args.batch_size,
-        shuffle=False,         # Pas besoin de mélanger la validation
+        collate_fn=ecg_collate_fn,
+        batch_sampler=val_sampler,
         num_workers=args.workers,
         pin_memory=True,
         persistent_workers=True,
@@ -268,9 +274,11 @@ def run(args):
         if epoch % 5 == 0:
             torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"backup_ep{epoch}.pt"))
 
+
     # Enregistre le temps total et les meilleurs résultats dans le résumé du run
     wandb.run.summary["total_train_time_hours"] = (time.time() - train_start_time) / 3600
     wandb.run.summary["best_val_loss"] = best_val_loss
+
     # Fin du script
     wandb.finish()
     print("[FIN] Script terminé avec succès.")

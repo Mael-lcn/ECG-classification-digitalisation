@@ -67,7 +67,7 @@ def load_metadata(path_h5, path_csv):
 
     # Ouverture du HDF5 pour extraire les IDs
     with h5py.File(path_h5, 'r') as f:
-        # On lit uniquement le dataset 'exam_id'. 
+        # On lit uniquement le dataset 'exam_id'
         exam_ids = f['exam_id'][:]
 
     return exam_ids, csv_data
@@ -90,7 +90,7 @@ def load_chunk(path_hd, start, end, device):
         torch.Tensor: Tenseur sur GPU de forme (N_chunk, C, T) prêt pour le traitement.
     """
     with h5py.File(path_hd, 'r') as f:
-        # Lecture uniquement de la fenetre [start:end] évite de charger tout le dataset.
+        # Lecture uniquement de la fenetre [start:end] évite de charger tout le dataset
         chunk_np = f['tracings'][start:end].astype(np.float32)
 
     # 1. Conversion en tenseur PyTorch
@@ -189,7 +189,7 @@ def get_active_boundaries(tracings, threshold=1e-6):
     # Correction pour les signaux totalement plats
     has_signal = is_active_time.any(dim=1)
     start_idx = torch.where(has_signal, start_idx, torch.zeros_like(start_idx))
-    end_idx   = torch.where(has_signal, end_idx, torch.zeros_like(end_idx))
+    end_idx = torch.where(has_signal, end_idx, torch.zeros_like(end_idx))
 
     del is_active_time, has_signal
     return start_idx, end_idx
@@ -248,7 +248,7 @@ def re_sampling(data, csv, fo=400):
         # sub_batch extrait une portion
         sub_batch = tracings[idx_tensor, :, :len_in]
 
-        # Initialisation ou réutilisation du module Resample
+        # Initialisation ou réutilisation du module Resample pour noyau partagé
         if fs_in not in resamplers:
             resamplers[fs_in] = torchaudio.transforms.Resample(
                 orig_freq=int(fs_in),
@@ -271,7 +271,7 @@ def re_sampling(data, csv, fo=400):
         # Nettoyage du bloc traité
         del resampled, idx_tensor
         # Force la libération de la mémoire fragmentée sur le GPU
-        torch.cuda.empty_cache() 
+        # torch.cuda.empty_cache() 
 
     data['tracings'] = None 
     del tracings
@@ -369,7 +369,7 @@ def add_bilateral_padding(tracings, target_size):
     # Préparer le tensor de sortie
     new_tracing = torch.zeros((N, C, target_size), dtype=tracings.dtype, device=device)
 
-    # 4) Injection vectorisée
+    # Injection vectorisée
     # On filtre les signaux valides
     valid = lengths > 0
     if valid.any():

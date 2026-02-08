@@ -20,7 +20,7 @@ MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 
 # Limite de sécurité VRAM (en Go). Le GPU fait environ 9.64, on réserve 600Mo pour le système/overhead
-VRAM_LIMIT_GB = 8.50
+VRAM_LIMIT_GB = 8.4
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
@@ -93,7 +93,7 @@ def unified_worker(task, output):
 
         # Boucle de traitement
         for i, (start, end) in enumerate(chunks_boundaries):
-            if start == end: continue # Sécurité
+            if start == end: continue
 
             # A. Chargement (Disque -> GPU)
             # Charge le tenseur sur 'device'
@@ -135,17 +135,17 @@ def unified_worker(task, output):
             print(f"   -> [{name}] {i+1}/{fragment_factor} processed.", flush=True)
 
         # Assemblage final sur CPU
-        # a. Calcul des dimensions finales
+        # Calcul des dimensions finales
         total_rows = sum(c.shape[0] for c in processed_chunks_cpu)
         max_t = max(c.shape[2] for c in processed_chunks_cpu)
         channels = processed_chunks_cpu[0].shape[1]
 
-        # b. Allocation "Zero-Copy" avec Padding Implicite
+        # Allocation avec Padding Implicite
         dataset['tracings'] = torch.zeros((total_rows, channels, max_t), 
                                           dtype=torch.float32, 
                                           device='cpu')
 
-        # c. Remplissage
+        # Remplissage
         processed_chunks_cpu.reverse()
 
         current_idx = 0

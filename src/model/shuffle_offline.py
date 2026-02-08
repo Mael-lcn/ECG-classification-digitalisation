@@ -2,7 +2,6 @@ import os
 import argparse
 import time
 import glob
-import sys
 import numpy as np
 import pandas as pd
 import h5py
@@ -133,7 +132,7 @@ def write_shard_task(task_config):
         et la taille des métadonnées attendues avant l'écriture.
     """
     shard_path = task_config['output_path']
-    # Le DataFrame reçu contient déjà 'trace_file' et 'h5_idx_src' corrects.
+    # Le DataFrame reçu contient déjà 'trace_file' et 'h5_idx_src' corrects
     inventory_df = task_config['inventory_df'].copy()
 
     # Réinitialiser l'index pour avoir un ordre 0..N propre pour ce shard
@@ -191,7 +190,7 @@ def write_shard_task(task_config):
             failed_idx = group['shard_local_idx'].values
             failed_indices.extend(failed_idx)
 
-    # --- Filtrage post-lecture (si échecs I/O) ---
+    # Filtrage post-lecture (si échecs I/O)
     valid_mask = np.ones(total_samples, dtype=bool)
     if failed_indices:
         valid_mask[failed_indices] = False
@@ -208,7 +207,7 @@ def write_shard_task(task_config):
     if len(final_df) == 0:
         return f"Shard {os.path.basename(shard_path)} : VIDE après filtrage erreurs."
 
-    # --- Assertions de Sécurité ---
+    # Assertions de Sécurité
     # C'est ce qui garantit que le CSV correspond au HDF5
     assert len(final_df) == len(final_ids_list), "Mismatch taille CSV vs IDs"
     assert len(final_df) == final_tracings.shape[0], "Mismatch taille CSV vs Tracings"
@@ -233,12 +232,13 @@ def write_shard_task(task_config):
         # Préparation CSV Final
         csv_path = shard_path.replace('.hdf5', '.csv')
 
-        # 1. Mise à jour du chemin source : pointe maintenant vers le nouveau shard
+        # Mise à jour du chemin source : pointe maintenant vers le nouveau shard
         final_df['trace_file'] = os.path.basename(shard_path)
 
-        # 2.  Nettoyage colonnes techniques
+        # Nettoyage colonnes techniques
         if 'split' in final_df.columns:
             final_df = final_df.drop(columns=['split'])
+
         cols_drop = ['shard_local_idx', 'h5_idx_src']
         final_df = final_df.drop(columns=[c for c in cols_drop if c in final_df.columns])
 
@@ -276,7 +276,7 @@ def run(args):
     start_time = time.time()
     os.makedirs(args.output, exist_ok=True)
 
-    # 1. SCAN & MAPPING (Parent Process)
+    # 1. Scan et mapping
     # C'est ici qu'on fait le mapping exam_id -> h5_idx_src une fois
     try:
         full_df = scan_sources_and_map_indices(args.input)
@@ -306,7 +306,7 @@ def run(args):
     # Préparation des taches
     print(f"\n--- Génération des Tâches (Shard size: {args.shard_size}) ---")
 
-    # Mélange global final (Shuffling)
+    # Mélange global final
     full_df = full_df.sample(frac=1, random_state=42).reset_index(drop=True)
 
     tasks = []
@@ -338,6 +338,7 @@ def run(args):
     
     with ctx.Pool(args.workers) as pool:
         results = list(tqdm(pool.imap_unordered(write_shard_task, tasks), total=len(tasks)))
+
 
     # Rapport
     success = [r for r in results if r.startswith("OK")]
