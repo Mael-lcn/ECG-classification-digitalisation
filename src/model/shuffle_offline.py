@@ -45,7 +45,7 @@ def scan_sources_and_map_indices(input_dir):
         Returns:
             pd.DataFrame: Un DataFrame "Inventaire" validé contenant les colonnes :
                 - toutes les colonnes des CSV originaux (ex: patient_id, age, label...)
-                - source_h5_path (str): Chemin absolu du fichier HDF5 source.
+                - trace_file (str): Chemin absolu du fichier HDF5 source.
                 - h5_idx_src (int): L'index de la ligne correspondant à l'exam_id dans le fichier source.
 
         Raises:
@@ -67,8 +67,8 @@ def scan_sources_and_map_indices(input_dir):
         raise ValueError("Aucun CSV trouvé !")
     
     full_csv = pd.concat(df_list, ignore_index=True)
-    # On enlève source_h5_path du CSV, car on va le redéfinir proprement
-    full_csv = full_csv.drop(columns=['source_h5_path'])
+    # On enlève trace_file du CSV, car on va le redéfinir proprement
+    full_csv = full_csv.drop(columns=['trace_file'])
 
     print(f"-> {len(full_csv)} entrées trouvées dans les CSV.")
 
@@ -87,7 +87,7 @@ def scan_sources_and_map_indices(input_dir):
                 for idx, raw_val in enumerate(raw_ids):
                     map_records.append({
                         'exam_id': normalize_id(raw_val),
-                        'source_h5_path': h5_path, # Chemin absolu
+                        'trace_file': h5_path, # Chemin absolu
                         'h5_idx_src': idx          # L'index integer pour h5py
                     })
         except Exception as e:
@@ -133,7 +133,7 @@ def write_shard_task(task_config):
         et la taille des métadonnées attendues avant l'écriture.
     """
     shard_path = task_config['output_path']
-    # Le DataFrame reçu contient déjà 'source_h5_path' et 'h5_idx_src' corrects.
+    # Le DataFrame reçu contient déjà 'trace_file' et 'h5_idx_src' corrects.
     inventory_df = task_config['inventory_df'].copy()
 
     # Réinitialiser l'index pour avoir un ordre 0..N propre pour ce shard
@@ -149,7 +149,7 @@ def write_shard_task(task_config):
     exam_ids_data = [None] * total_samples
 
     # On groupe par fichier source pour ne l'ouvrir qu'une fois
-    grouped = inventory_df.groupby('source_h5_path')
+    grouped = inventory_df.groupby('trace_file')
 
     # Détection dynamique de la shape
     time_dim = 0
@@ -230,11 +230,11 @@ def write_shard_task(task_config):
                                  data=np.array(final_ids_list, dtype=object), 
                                  dtype=dt_str)
 
-        # --- Préparation CSV Final ---
+        # Préparation CSV Final
         csv_path = shard_path.replace('.hdf5', '.csv')
 
         # 1. Mise à jour du chemin source : pointe maintenant vers le nouveau shard
-        final_df['source_h5_path'] = os.path.basename(shard_path)
+        final_df['trace_file'] = os.path.basename(shard_path)
 
         # 2.  Nettoyage colonnes techniques
         if 'split' in final_df.columns:
@@ -284,7 +284,7 @@ def run(args):
         print(f"Arrêt critique : {e}")
         return
 
-    # 2. SPLIT PAR PATIENT
+    # Split par patient
     print("\n--- Split Train/Val/Test (Patient Aware) ---")
     patients = full_df['patient_id'].unique()
     np.random.shuffle(patients)
@@ -303,7 +303,7 @@ def run(args):
     print("Répartition des échantillons :")
     print(full_df['split'].value_counts())
 
-    # 3. PRÉPARATION DES TÂCHES
+    # Préparation des taches
     print(f"\n--- Génération des Tâches (Shard size: {args.shard_size}) ---")
 
     # Mélange global final (Shuffling)
@@ -333,14 +333,13 @@ def run(args):
 
     print(f"{len(tasks)} tâches prêtes.")
 
-    # 4. EXÉCUTION
     print(f"\n--- Démarrage Multiprocessing ({args.workers} workers) ---")
     ctx = multiprocessing.get_context('spawn')
     
     with ctx.Pool(args.workers) as pool:
         results = list(tqdm(pool.imap_unordered(write_shard_task, tasks), total=len(tasks)))
 
-    # 5. Rapport
+    # Rapport
     success = [r for r in results if r.startswith("OK")]
     fails = [r for r in results if not r.startswith("OK")]
     
@@ -368,7 +367,7 @@ def main():
 
     parser.add_argument('--train_prct', type=float, default=0.80, help='Ratio Train (0-1)')
     parser.add_argument('--val_prct', type=float, default=0.10, help='Ratio Validation (0-1)')
-    
+
     parser.add_argument('-w', '--workers', type=int, default=os.cpu_count()-1,
                         help='Nombre de processus parallèles (Défaut: CPU-1)')
 
