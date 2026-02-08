@@ -12,8 +12,9 @@ import wandb  # Librairie de monitoring
 
 from torch.utils.data import DataLoader
 from dataset import LargeH5Dataset, ecg_collate_fn
-from model import CNN 
+from cnn import CNN
 from Sampler import MegaBatchSortishSampler
+
 
 
 # TODO ajouter la méthode pour opti le forward sur big batch
