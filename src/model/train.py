@@ -235,44 +235,49 @@ def run(args):
             scaler_amp, device, epoch, args.epochs, use_amp
         )
 
-        # B. Validation
-        # On valide à chaque époque
-        val_loss = validate(model, val_loader, criterion, device, use_amp)
-
-        # D. Envoi des stats à WandB
         metrics = {
             "epoch": epoch,
             "train/loss": train_loss,
-            "val/loss": val_loss,
         }
+
+        val_loss = None
+        # Validation dès 15 epoch. Inutile avant
+        if epoch > 15:
+            # B. Validation
+            val_loss = validate(model, val_loader, criterion, device, use_amp)
+
+            # C. Sauvegarde du Meilleur Modèle
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                stagnation_counter = 0
+
+                # Nom du fichier
+                save_path = os.path.join(args.checkpoint_dir, "best_model.pt")
+
+                # Sauvegarde locale
+                torch.save(model.state_dict(), save_path)
+                print(f"    *** NEW RECORD *** Modèle sauvegardé : {save_path}")
+            else:
+                stagnation_counter += 1
+                print(f"    [PATIENCE] Pas d'amélioration ({stagnation_counter}/{args.patience})")
+
+                # D. Early Stopping
+                if stagnation_counter >= args.patience:
+                    print(f"\n[STOP] Arrêt précoce déclenché (Patience {args.patience} atteinte).")
+                    print(f"       Meilleur score : {best_val_loss:.4f}")
+                    break
+
+        # E. Backup périodique
+        if epoch % 5 == 0:
+            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"backup_ep{epoch}.pt"))
+
+        if val_loss:
+            metrics["val/loss"] =  val_loss
+
+        # F. Envoi des stats à WandB
         wandb.log(metrics)
 
         print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val={val_loss:.4f}")
-
-        # E. Sauvegarde du Meilleur Modèle
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            stagnation_counter = 0
-
-            # Nom du fichier
-            save_path = os.path.join(args.checkpoint_dir, "best_model.pt")
-
-            # Sauvegarde locale
-            torch.save(model.state_dict(), save_path)
-            print(f"    *** NEW RECORD *** Modèle sauvegardé : {save_path}")
-        else:
-            stagnation_counter += 1
-            print(f"    [PATIENCE] Pas d'amélioration ({stagnation_counter}/{args.patience})")
-
-            # F. Early Stopping
-            if stagnation_counter >= args.patience:
-                print(f"\n[STOP] Arrêt précoce déclenché (Patience {args.patience} atteinte).")
-                print(f"       Meilleur score : {best_val_loss:.4f}")
-                break
-
-        # G. Backup périodique
-        if epoch % 5 == 0:
-            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"backup_ep{epoch}.pt"))
 
 
     # Enregistre le temps total et les meilleurs résultats dans le résumé du run
