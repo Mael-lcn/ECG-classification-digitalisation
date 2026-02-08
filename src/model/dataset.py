@@ -76,6 +76,7 @@ class LargeH5Dataset(Dataset):
         cumul = 0
         print(f"Initialisation du Dataset: Scan de {len(self.h5_paths)} fichiers...")
 
+        # Calcul la taille cumulé
         for p in self.h5_paths:
             with h5py.File(p, 'r') as f:
                 n_samples = f['exam_id'].shape[0]

@@ -1,4 +1,5 @@
 from torch.utils.data import Sampler
+import numpy as np
 
 
 
@@ -30,18 +31,13 @@ class MegaBatchSortishSampler(Sampler):
         # Initialisation des variables
         self.dataset = dataset
         self.batch_size = batch_size
-        self.mega_batch_factor = mega_batch_factor
         self.shuffle = shuffle
 
-        # On récupère la référence directe vers la liste des longueurs
-        self.lengths = self.dataset.all_lengths
-
         # On définit la taille du "Méga-Lot" (ex: 50 * 64 = 3200 indices)
-        self.mega_batch_size = self.batch_size * self.mega_batch_factor
+        self.mega_batch_size = self.batch_size * mega_batch_factor
 
-        # Sécurité : vérifier que le dataset n'est pas vide
-        if len(self.lengths) == 0:
-            raise ValueError("Le dataset semble vide ou 'all_lengths' n'a pas été initialisé.")
+        # Pré-calcul des bornes de fichiers
+        self.boundaries = [0] + self.dataset.cumulative_sizes
 
 
     def __iter__(self):
@@ -58,25 +54,41 @@ class MegaBatchSortishSampler(Sampler):
            c. Découper ce Mega-Chunk trié en petits morceaux de 'batch_size'.
            d. YIELD (renvoyer) chaque petit morceau (liste d'indices).
         """
-        
-        """
-        Mélange Global (si self.shuffle est True) : Génères une liste de tous les indices de 0 à N-1 et la mélanges (avec indices = np.random.permutation(len(self.dataset)) ).
+        num_files = len(self.dataset.h5_paths)
+        file_order = np.arange(num_files)
+        if self.shuffle:
+            np.random.shuffle(file_order)
 
-        Découpage en Mega-Batches : parcours cette liste mélangée par pas de mega_batch_size.
+        # On traite chaque fichier un par un
+        for f_idx in file_order:
+            # Bornes globales de ce fichier
+            start_global = self.boundaries[f_idx]
+            end_global = self.boundaries[f_idx + 1]
 
-        Tri Local : Pour chaque Mega-Batch
+            # Génération des indices globaux pour ce fichier
+            indices_in_file = np.arange(start_global, end_global)
 
-        Récupère les longueurs de ces indices précis.
+            # 3. Mélange local (Intra-fichier)
+            if self.shuffle:
+                np.random.shuffle(indices_in_file)
 
-        Trie les indices de ce groupe du plus long au plus court.
+            # On découpe les indices du fichier en mega batch
+            for i in range(0, len(indices_in_file), self.mega_batch_size):
+                mega_chunk = indices_in_file[i : i + self.mega_batch_size]
 
-        Création des mini-batches (Le "Out") : découpes ce groupe trié en morceaux de la taille de batch_size et fais un yield pour chaque morceau.
-        """
-        pass
+                # Tri par longueur descendant pour minimiser le padding dans le batch
+                lengths = self.dataset.all_lengths[mega_chunk]
+                argsort = np.argsort(lengths)[::-1]
+                sorted_mega_chunk = mega_chunk[argsort]
+
+                # Découpage final en Mini-Batch
+                for j in range(0, len(sorted_mega_chunk), self.batch_size):
+                    batch = sorted_mega_chunk[j : j + self.batch_size]
+                    yield batch.tolist()
 
 
     def __len__(self):
         """
         Renvoie le nombre total de batches dans une époque.
         """
-        return (self.dataset.length + self.batch_size-1) // self.batch_size
+        return (self.dataset.total_length + self.batch_size-1) // self.batch_size

@@ -19,8 +19,8 @@ MAX_TEMPS = 144
 MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 
-# Limite de sécurité VRAM (en Go). Le GPU fait environ 9.6, on réserve 1Go pour le système/overhead
-VRAM_LIMIT_GB = 8.6 
+# Limite de sécurité VRAM (en Go). Le GPU fait environ 9.64, on réserve 600Mo pour le système/overhead
+VRAM_LIMIT_GB = 8.50
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
@@ -34,144 +34,151 @@ def estimate_vram_gb(path_h5):
             shape = f['tracings'].shape
             # N * C * T * 4 bytes / 1024^3
             size_gb = (torch.tensor(shape).prod().item() * 4) / (1024**3)
-            # Facteur 2 car resampling + z-norm créent des copies temporaires
-            return max(size_gb * 2, 0.2)
+            # Facteur multiplicatif car resampling + z-norm créent des copies temporaires
+            return max(size_gb * 1.333, 0.2)
     except:
         return 0.5
 
 
 def unified_worker(task, output):
     """
-    Orchestrateur de traitement ECG avec gestion de mémoire par segmentation (Chunks).
+    Worker optimisé pour le traitement ECG haute performance sous contrainte VRAM.
 
-    Cette fonction traite des fichiers HDF5 massifs (5Go+) sur une VRAM limitée (9.6Go) 
-    en suivant une stratégie de "chargement unique et traitement par morceaux". 
-    Elle garantit l'alignement entre les signaux (HDF5) et les métadonnées (CSV) 
-    en utilisant les 'exam_id' comme clés de synchronisation.
-
-    Processus :
-    1. Admission contrôlée par budget VRAM (Lock) pour éviter les crashs simultanés.
-    2. Chargement HDF5 (GPU) et CSV (CPU).
-    3. Découpage en 3 chunks via des 'vues' (narrow) pour éviter la duplication inutile.
-    4. Réalignement dynamique du CSV pour chaque chunk à partir des exam_id.
-    5. Traitement (Resampling + Z-Norm) et reconstruction finale sécurisée.
-    6. Libération agressive de la mémoire (GC + Cache CUDA).
+    Stratégie :
+    1. Streaming GPU : Charge et traite par petits blocs pour minimiser l'empreinte VRAM.
+    2. Déchargement Immédiat : Renvoie les tenseurs sur RAM (CPU) dès la fin du calcul.
+    3. Assemblage CPU: Utilise une pré-allocation et une consommation inversée de la liste 
+       pour éviter les réallocations et copies mémoire lors de la fusion finale.
 
     Args:
-        task (tuple): (mode, name, path) où path est (path_hdf5, path_csv).
-        output (str): Répertoire de destination pour les résultats.
+        task (tuple): (mode, name, (path_h5, path_csv)).
+        output (str): Dossier de destination.
     """
     global current_vram_usage
     mode, name, path = task
-    path_h5 = path[0]
+    path_h5, path_csv = path
 
-    # On évalue le poids du fichier pour ne pas dépasser la capacité du GPU
+    # Admission et verouillage VRAM
     cost = estimate_vram_gb(path_h5)
-
     with vram_lock:
         while current_vram_usage + cost > VRAM_LIMIT_GB:
             vram_lock.wait()
         current_vram_usage += cost
 
-    dataset, csv_full = None, None
-    try:
-        # dataset['tracings'] est envoyé sur GPU, 'exam_id' reste sur CPU (via load)
-        dataset, csv_full = load(path, use_csv=True, to_gpu=True)
-        tracings = dataset['tracings']
-        exam_ids = dataset['exam_id']
-        N = tracings.shape[0]
+    # Structures de données
+    dataset = {}
+    csv_full = None
+    processed_chunks_cpu = [] 
+    all_lengths = []
+    all_starts = []
 
-        # Préparation du CSV : Indexation par 'exam_id' pour un réalignement rapide
+    try:
+        # Sélection du device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Lecture des méta données sur CPU
+        exam_ids, csv_full = load_metadata(path_h5, path_csv)
+        N = len(exam_ids)
+
+        # Indexation optimisée
         csv_full['exam_id'] = csv_full['exam_id'].astype(str)
         csv_indexed = csv_full.set_index('exam_id')
 
-        # Traitement par chunks
-        # Définition des bornes pour diviser le batch en 3 parties égales
-        indices = [0, N // 3, (2 * N) // 3, N]
-        processed_chunks = []
+        # On divise le fichier en morceaux égaux
+        fragment_factor = 3
+        chunks_boundaries = [
+            ((i * N) // fragment_factor, ((i + 1) * N) // fragment_factor) 
+            for i in range(fragment_factor)
+        ]
 
-        for i in range(3):
-            start, end = indices[i], indices[i+1]
-            if start == end: continue
+        # Boucle de traitement
+        for i, (start, end) in enumerate(chunks_boundaries):
+            if start == end: continue # Sécurité
 
-            # .narrow() crée une vue
-            chunk_tracings = tracings.narrow(0, start, end - start)
+            # A. Chargement (Disque -> GPU)
+            # Charge le tenseur sur 'device'
+            chunk_gpu = load_chunk(path_h5, start, end, device)
             chunk_ids_raw = exam_ids[start:end]
 
-            # Conversion des IDs du segment pour l'extraction du CSV
-            chunk_ids_str = [
-                eid.decode('utf-8') if isinstance(eid, (bytes, bytearray)) else str(eid) 
-                for eid in chunk_ids_raw
-            ]
-
-            # Extraction des métadonnées correspondant au chunk
-            chunk_csv = csv_indexed.reindex(chunk_ids_str).reset_index()
-
+            # B. Traitement (Resampling / Filtres)
             if mode == 'D1':
-                temp_data = {'tracings': chunk_tracings, 'exam_id': chunk_ids_raw}
+                # Extraction subset CSV uniquement
+                chunk_ids_str = [eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) for eid in chunk_ids_raw]
+                chunk_csv = csv_indexed.reindex(chunk_ids_str).reset_index()
+
+                temp_data = {'tracings': chunk_gpu, 'exam_id': chunk_ids_raw}
+
                 # Le resampling crée un nouveau tenseur
-                chunk_result = re_sampling(temp_data, chunk_csv, fo=TARGET_FREQ)
-            else:
-                chunk_result = chunk_tracings
+                # On écrase 'chunk_gpu' pour libérer l'ancien tenseur via le gc
+                chunk_gpu = re_sampling(temp_data, chunk_csv, fo=TARGET_FREQ)
 
-            # Normalisation Z-score in-place
-            z_norm(chunk_result)
+                # Nettoyage immédiat des objets Python inutiles
+                del temp_data, chunk_csv, chunk_ids_str
 
-            # Stockage du résultat intermédiaire du chunk
-            processed_chunks.append(chunk_result)
+            # C. Normalisation (In-Place pour économiser VRAM)
+            z_norm(chunk_gpu)
 
-            # Nettoyage des objets intermédiaires pour libérer de l'espace de travail
-            del chunk_ids_str, chunk_csv
-            torch.cuda.empty_cache()
-            print(f"   -> [{name}] Bloc {i+1}/3 traité")
+            # D. Calcul Métadonnées
+            s_idx, e_idx = get_active_boundaries(chunk_gpu, threshold=1e-5)
 
-        dataset['tracings'] = None 
-        del tracings
-        torch.cuda.empty_cache()
+            # Transfert métadonnées vers CPU (Numpy list)
+            all_lengths.append((e_idx - s_idx).cpu().numpy())
+            all_starts.append(s_idx.cpu().numpy())
 
-        # Cherche l'axe T le plus long dans les reuslats
-        all_t_sizes = [c.shape[2] for c in processed_chunks]
-        max_t = max(all_t_sizes)
+            # E. Décharge (GPU -> CPU)
+            chunk_cpu = chunk_gpu.cpu()
+            processed_chunks_cpu.append(chunk_cpu)
 
-        # Pad les signaux pour etre homogène sur T
-        for i in range(len(processed_chunks)):
-            current_t = processed_chunks[i].shape[2]
+            # F. Nettoyage GPU
+            del chunk_gpu, s_idx, e_idx
+            
+            print(f"   -> [{name}] {i+1}/{fragment_factor} processed.", flush=True)
 
-            if current_t < max_t:
-                # Calcul de la différence manquante
-                diff = max_t - current_t
-                N_chunk, C, _ = processed_chunks[i].shape
+        # Assemblage final sur CPU
+        # a. Calcul des dimensions finales
+        total_rows = sum(c.shape[0] for c in processed_chunks_cpu)
+        max_t = max(c.shape[2] for c in processed_chunks_cpu)
+        channels = processed_chunks_cpu[0].shape[1]
 
-                # Création du "patch" de zéros sur le même device (GPU)
-                padding_patch = torch.zeros((N_chunk, C, diff), 
-                                        device=processed_chunks[i].device, 
-                                        dtype=processed_chunks[i].dtype)
+        # b. Allocation "Zero-Copy" avec Padding Implicite
+        dataset['tracings'] = torch.zeros((total_rows, channels, max_t), 
+                                          dtype=torch.float32, 
+                                          device='cpu')
 
-                # On allonge le chunk sur la dimension 2 (le temps)
-                # On remplace l'élément dans la liste par sa version rallongée
-                processed_chunks[i] = torch.cat([processed_chunks[i], padding_patch], dim=2)
+        # c. Remplissage
+        processed_chunks_cpu.reverse()
 
-                # Nettoyage immédiat du patch
-                del padding_patch
+        current_idx = 0
+        while processed_chunks_cpu:
+            chunk = processed_chunks_cpu.pop()
 
-        # Fusion finale
-        dataset['tracings'] = torch.cat(processed_chunks, dim=0)
-        del processed_chunks
+            n, _, t = chunk.shape
 
-        # On réordonne le CSV complet selon l'ordre exact des exam_id du HDF5
-        final_h5_ids = [
-            eid.decode('utf-8') if isinstance(eid, (bytes, bytearray)) else str(eid) 
-            for eid in exam_ids
-        ]
+            # Copie RAM -> RAM
+            # Le slicing [:, :t] protège le padding à droite (qui reste à 0)
+            dataset['tracings'][current_idx : current_idx + n, :, :t] = chunk
+
+            current_idx += n
+
+            # Suppression explicite
+            del chunk
+
+        # Ajout des IDs
+        dataset['exam_id'] = exam_ids
+
+        # Reconstruction du csv
+        # Conversion IDs pour reindexing
+        final_h5_ids = [eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) for eid in exam_ids]
         final_csv = csv_indexed.reindex(final_h5_ids).reset_index()
 
-        # Harmonisation des colonnes selon le mode (D1 vs Classification)
+        # Injection rapide via Numpy
+        final_csv['length'] = np.concatenate(all_lengths)
+        final_csv['start_offset'] = np.concatenate(all_starts)
+
         if mode != 'D1':
             final_csv.rename(columns={"normal_ecg": "NSR"}, inplace=True)
 
-        final_csv['length'] = 1
-
-        #Save
+        # Save
         write_results(dataset, final_csv, name, output)
 
     except Exception as e:
@@ -179,13 +186,19 @@ def unified_worker(task, output):
         raise e
 
     finally:
-        #Nettoyage
-        if dataset is not None: del dataset
+        # Nettoyage final
+        # Suppression des références aux gros objets
+        if 'dataset' in locals(): del dataset
+        if 'processed_chunks_cpu' in locals(): del processed_chunks_cpu
         if csv_full is not None: del csv_full
-        gc.collect()
-        torch.cuda.empty_cache()
 
-        # Libération de l'admission VRAM pour les threads en attente
+        # Appel explicite au GC Python
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Libération du slot VRAM dans le gestionnaire global
         with vram_lock:
             current_vram_usage -= cost
             vram_lock.notify_all()

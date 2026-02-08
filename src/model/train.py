@@ -294,9 +294,8 @@ def run(args):
             scaler_amp, device, epoch, args.epochs, use_amp
         )
 
-        # B. Phase de Validation (Conditionnelle : Seulement > 10)
         val_loss = None 
-
+        # B. Phase de Validation (Conditionnelle : Seulement > 10)
         if epoch > 10:
             val_loss = validate(model, val_loader, criterion, device, use_amp)
             print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val={val_loss:.4f}")

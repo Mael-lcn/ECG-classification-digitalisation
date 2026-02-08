@@ -46,87 +46,114 @@ def collect_files(input_dir):
     return patch_dict
 
 
-def load(path, use_csv=True, to_gpu=True):
+def load_metadata(path_h5, path_csv):
     """
-    Charge les données HDF5/CSV.
+    Charge les métadonnées et les identifiants d'examen sans charger les signaux.
 
-    Seul le dataset nommé 'tracings' est envoyé sur le GPU.
-    Tout le reste ('exam_id', etc.) reste sur le CPU.
+    Cette approche 'lazy' permet de planifier le découpage en morceaux (chunks) 
+    sans saturer la mémoire vive (VRAM) du système, même pour des fichiers de plusieurs Go.
 
     Args:
-        path (tuple): (chemin_hdf5, chemin_csv).
-        use_csv (bool): Charger le CSV.
-        to_gpu (bool): Activer le transfert GPU pour 'tracings'.
+        path_h5 (str): Chemin vers le fichier source HDF5.
+        path_csv (str): Chemin vers le fichier CSV contenant les labels/métadonnées.
 
     Returns:
-        tuple: (h5_content, csv_data)
+        tuple: (exam_ids, csv_data)
+            - exam_ids (np.ndarray): Tableau des identifiants (clés de synchronisation).
+            - csv_data (pd.DataFrame): DataFrame complet des métadonnées.
     """
-    path_hd, path_csv = path
-    csv_data = None
+    # Lecture du CSV
+    csv_data = pd.read_csv(path_csv)
 
-    # Charge le CSV
-    if use_csv:
-        csv_data = pd.read_csv(path_csv)
+    # Ouverture du HDF5 pour extraire les IDs
+    with h5py.File(path_h5, 'r') as f:
+        # On lit uniquement le dataset 'exam_id'. 
+        exam_ids = f['exam_id'][:]
 
-    # Charge tout le HDF5 en RAM
-    h5_content = {}
+    return exam_ids, csv_data
+
+
+def load_chunk(path_hd, start, end, device):
+    """
+    Charge une portion spécifique du signal ECG directement depuis le disque.
+
+    Utilise le slicing HDF5 pour ne lire que les octets nécessaires. Les données
+    transitent brièvement par la RAM CPU avant d'être injectées sur le GPU.
+
+    Args:
+        path_hd (str): Chemin vers le fichier HDF5.
+        start (int): Index de début de la tranche (inclus).
+        end (int): Index de fin de la tranche (exclus).
+        device (torch.device): Périphérique cible (ex: 'cuda:0').
+
+    Returns:
+        torch.Tensor: Tenseur sur GPU de forme (N_chunk, C, T) prêt pour le traitement.
+    """
     with h5py.File(path_hd, 'r') as f:
-        h5_content['tracings'] = f['tracings'][:].astype(np.float32)
-        h5_content['exam_id'] = f['exam_id'][:]
+        # Lecture uniquement de la fenetre [start:end] évite de charger tout le dataset.
+        chunk_np = f['tracings'][start:end].astype(np.float32)
 
-    if to_gpu:
-        # Détection automatique du GPU
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
+    # 1. Conversion en tenseur PyTorch
+    chunk_tensor = torch.from_numpy(chunk_np).permute(0, 2, 1).contiguous().to(device)
 
-        h5_content['tracings'] = torch.from_numpy(h5_content['tracings']).permute(0, 2, 1).contiguous().to(device)
-
-    return h5_content, csv_data
+    return chunk_tensor
 
 
 def write_results(data_dict, csv, name, output_dir):
     """
-    Sauvegarde le contenu d'un dictionnaire dans un fichier HDF5.
-    Adapte automatiquement les Tenseurs GPU vers CPU/Numpy.
+    Sauvegarde les signaux et métadonnées.
+
+    Cette fonction exporte les résultats du traitement vers un fichier HDF5 (signaux)
+    et un fichier CSV (métadonnées). Elle est optimisée pour des tenseurs PyTorch 
+    déjà localisés sur le CPU.
 
     Args:
-        data_dict (dict): Données (Clé -> Tensor GPU ou List ou Numpy).
-        name (str): Nom fichier (ex: 'clean_data.hdf5').
-        output_dir (str): Dossier cible.
+        data_dict (dict): Dictionnaire contenant les données à sauvegarder.
+            Exemple : {'tracings': torch.Tensor (CPU), 'exam_id': np.array}.
+        csv (pd.DataFrame): DataFrame des métadonnées alignées avec les signaux.
+        name (str): Nom du fichier de sortie (ex: 'data_processed.hdf5').
+        output_dir (str): Répertoire de destination.
+
+    Returns:
+        None
     """
     # Création du dossier si inexistant
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
     file_path = os.path.join(output_dir, name)
-    print(f"[SAVE] Écriture dans : {file_path}")
+    print(f"[SAVE] Écriture disque (Raw) : {file_path}")
 
     with h5py.File(file_path, 'w') as f:
         for key, value in data_dict.items():
-            # adaptation GPU -> CPU
+            # Conversion Tensor (CPU) -> Numpy
             if torch.is_tensor(value):
-                value = value.cpu().numpy()
+                value = value.numpy()
+
+            # Gestion spécifique des IDs pour la compatibilité HDF5
+            if key == 'exam_id' and isinstance(value, np.ndarray):
+                # Encodage en chaînes de caractères de longueur variable (vlen)
+                if value.dtype.kind in {'U', 'S', 'O'}:
+                    value = value.astype(h5py.special_dtype(vlen=str))
 
             # Écriture
             try:
                 f.create_dataset(key, data=value)
-                shape_str = str(value.shape) if hasattr(value, 'shape') else str(len(value))
-                print(f"   -> Dataset '{key}' sauvegardé. Shape: {shape_str}")
-            except Exception as e:
-                print(f"   [ERREUR] Échec écriture '{key}': {e}")
 
+                shape_str = str(value.shape) if hasattr(value, 'shape') else str(len(value))
+                print(f"   -> Dataset '{key}' écrit. Forme : {shape_str}")
+            except Exception as e:
+                print(f"   [ERREUR] Échec de l'écriture du dataset '{key}': {e}")
+
+    # Sauvegarde des métadonnées CSV
     if csv is not None:
-        # On remplace l'extension .hdf5 par .csv pour le nom
-        csv_name = name.replace(".hdf5", ".csv")
+        # On s'assure que l'extension est correcte
+        csv_name = name.rsplit('.', 1)[0] + ".csv"
         csv_path = os.path.join(output_dir, csv_name)
         try:
             csv.to_csv(csv_path, index=False)
+            print(f"   -> CSV associé sauvegardé : {csv_name}")
         except Exception as e:
-            print(f"   [ERREUR] Échec écriture CSV: {e}")
+            print(f"   [ERREUR] Échec de l'écriture du fichier CSV : {e}")
 
 
 
