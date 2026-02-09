@@ -17,7 +17,6 @@ from Sampler import MegaBatchSortishSampler
 
 
 
-# TODO ajouter la méthode pour opti le forward sur big batch
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
     """
     Exécute une époque d'entraînement complète (Forward + Backward pass).
@@ -327,6 +326,7 @@ def main():
 
     # Lancement
     run(args)
+
 
 if __name__ == "__main__":
     main()
