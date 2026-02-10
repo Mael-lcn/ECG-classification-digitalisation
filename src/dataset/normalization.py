@@ -18,7 +18,7 @@ TARGET_FREQ = 400
 
 
 # Limite de sécurité VRAM (en Go). Le GPU fait environ 9.64, on réserve 600Mo pour le système/overhead
-VRAM_LIMIT_GB = 8.4
+VRAM_LIMIT_GB = 8.5
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
@@ -33,7 +33,7 @@ def estimate_vram_gb(path_h5):
             # N * C * T * 4 bytes / 1024^3
             size_gb = (torch.tensor(shape).prod().item() * 4) / (1024**3)
             # Facteur multiplicatif car resampling + z-norm créent des copies temporaires
-            return max(size_gb * 1.333, 0.2)
+            return max(size_gb * 1.1, 0.2)
     except:
         return 0.5
 
@@ -58,15 +58,19 @@ def unified_worker(task, output):
 
     # Admission et verouillage VRAM
     cost = estimate_vram_gb(path_h5)
+
     with vram_lock:
-        while current_vram_usage + cost > VRAM_LIMIT_GB:
+        # Si on a assez de VRAM ou que aucun file n'est traité, on autorise le traitement
+        while (current_vram_usage + cost > VRAM_LIMIT_GB): #and (current_vram_usage > 0):
             vram_lock.wait()
+
         current_vram_usage += cost
+
 
     # Structures de données
     dataset = {}
     csv_full = None
-    processed_chunks_cpu = [] 
+    processed_chunks_cpu = []
     all_lengths = []
     all_starts = []
 
@@ -83,7 +87,7 @@ def unified_worker(task, output):
         csv_indexed = csv_full.set_index('exam_id')
 
         # On divise le fichier en morceaux égaux
-        fragment_factor = 3
+        fragment_factor = 4
         chunks_boundaries = [
             ((i * N) // fragment_factor, ((i + 1) * N) // fragment_factor) 
             for i in range(fragment_factor)
