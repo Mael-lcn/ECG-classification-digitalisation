@@ -15,8 +15,6 @@ from aux import *
 
 # --- CONFIGURATION GLOBALE ---
 TARGET_FREQ = 400
-MAX_TEMPS = 144
-MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 
 # Limite de sécurité VRAM (en Go). Le GPU fait environ 9.64, on réserve 600Mo pour le système/overhead

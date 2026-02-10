@@ -3,7 +3,7 @@ import json
 import argparse
 import re
 import time
-import multiprocessing
+import multiprocessing, partial
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,7 +11,7 @@ from tqdm import tqdm
 import wandb  # Librairie de monitoring
 
 from torch.utils.data import DataLoader
-from dataset import LargeH5Dataset, ecg_collate_fn
+from dataset import LargeH5Dataset, ecg_collate_wrapper
 from cnn import CNN
 from Sampler import MegaBatchSortishSampler
 
@@ -158,10 +158,13 @@ def run(args):
     train_sampler = MegaBatchSortishSampler(train_ds, batch_size=args.batch_size, shuffle=True)
     val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
 
+    collate_fn = partial(ecg_collate_wrapper, 
+                     padding_mode=args.padding_mode)
+
     # Dataloader de Training
     train_loader = DataLoader(
         dataset=train_ds,
-        collate_fn=ecg_collate_fn,
+        collate_fn=collate_fn,
         batch_sampler=train_sampler,
         num_workers=args.workers,
         pin_memory=True,
@@ -172,7 +175,7 @@ def run(args):
     # Dataloader de Validation
     val_loader = DataLoader(
         dataset=val_ds,
-        collate_fn=ecg_collate_fn,
+        collate_fn=collate_fn,
         batch_sampler=val_sampler,
         num_workers=args.workers,
         pin_memory=True,
@@ -313,6 +316,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--patience', type=int, default=5, help="Nb époques sans amélioration avant arrêt")
+    parser.add_argument('--padding_mode', action='store_false', default=True, 
+                    help="True (par défaut) formate les batchs à la taille max du lot. False force la taille universelle.")
 
     # Arguments Système
     parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count()-2, 

@@ -2,11 +2,19 @@ import h5py
 import glob
 import os
 import torch
-from torch.utils.data import Dataset
 import bisect
 import pandas as pd
 import numpy as np
+
+from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
+
+from src.dataset.normalization import TARGET_FREQ
+
+
+MAX_TEMPS = 144
+MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 
 
@@ -194,37 +202,76 @@ class LargeH5Dataset(Dataset):
 
 
 
-def ecg_collate_fn(batch):
+
+
+def ecg_collate_wrapper(batch, mode_batch=True, fixed_length=MAX_SIGNAL_LENGTH):
     """
-    Regroupe des ECG de longueurs variables dans un tenseur unique (Batch).
+    Transforme une liste d'échantillons de tailles variables en un Batch PyTorch.
+
+    Cette fonction harmonise les dimensions temporelles des signaux pour qu'ils puissent être empilés dans un seul tenseur.
     
-    Cette fonction est appelée par le DataLoader pour transformer la liste de
-    tuples extraits du Dataset en deux tenseurs exploitables par le GPU.
-    Elle gère le padding dynamique : chaque batch aura la longueur de son
-    élément le plus long.
+    Elle propose deux stratégies via 'mode_batch' :
+    1. mode_batch=True (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
+       Le batch est paddé à la longueur du signal le plus long de ce batch.
+       Ex: Si le max du batch est 4500, tout le monde est paddé à 4500.
+       
+    2. mode_batch=False (Universel) : Idéal pour les CNN classiques (avec couches Dense).
+       Le batch est forcé à une taille fixe 'fixed_length'.
+       - Trop court ? Padding (zéros à la fin).
+       - Trop long ? Cropping (on coupe la fin).
 
     Args:
-        batch (list): Liste de tuples [(signal, label), ...] 
-                      - signal: torch.Tensor de forme (12, T)
-                      - label: torch.Tensor de forme (NumClasses,)
+        batch (list): Liste de tuples [(signal, label), ...] fournie par le Dataset.
+                      - signal : Tensor de forme (Channels=12, Time=Variable)
+                      - label  : Tensor de forme (NumClasses,) ou scalaire.
+        mode_batch (bool): Si True, utilise le padding dynamique (max du batch).
+                           Si False, force la taille 'fixed_length'.
+        fixed_length (int): La taille cible temporelle (T) pour le mode universel.
 
     Returns:
         tuple: (padded_signals, stacked_labels)
-               - padded_signals: torch.Tensor (Batch, 12, Max_T_du_batch)
-               - stacked_labels: torch.Tensor (Batch, NumClasses)
+               - padded_signals : Tensor (Batch, 12, T_Finale)
+               - stacked_labels : Tensor (Batch, NumClasses)
     """
-    # Extraction des signaux et des labels
-    # On transpose chaque signal de (12, T) à (T, 12) pour que pad_sequence qui pad que la 1er dim 
-    signals = [item[0].T for item in batch]
+    # Transpose (Channels, Time) -> (Time, Channels) car pad_sequence travaille sur la dimension 0 (Time)
+    signals = [item[0].T for item in batch]  
     labels = [item[1] for item in batch]
 
-    # Application du padding
-    padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)    # Résultat : (Batch, Max_T, 12)
+    # --- Option 1 : Padding dynamique ---
+    if mode_batch:
+        # pad_sequence trouve automatiquement le max du batch et comble les trous.
+        # batch_first=True -> Sortie : (Batch, Max_Time_du_Batch, 12)
+        padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)
+
+    # --- Option 2 : Padding/Cropping fixe ---
+    else:
+        # On doit traiter chaque signal individuellement pour atteindre 'fixed_length'
+        processed_signals = []
+
+        for s in signals:
+            current_len = s.shape[0] # Dimension Time (car on a transposé au début)
+
+            if current_len == fixed_length:
+                processed_signals.append(s)
+
+            elif current_len < fixed_length:    # Le signal est trop court
+                diff = fixed_length - current_len
+                # F.pad sur (Time, 12) -> (Pad_Left, Pad_Right, Pad_Top, Pad_Bottom)
+                padded = F.pad(s, (0, 0, 0, diff), "constant", 0.0)
+                processed_signals.append(padded)
+
+            else:   # Le signal est trop long
+                # On ne garde que les 'fixed_length' premiers points temporels
+                cropped = s[:fixed_length, :]
+                processed_signals.append(cropped)
+
+        # On empile la liste pour créer le tenseur (Batch, Fixed_Length, 12)
+        padded_batch = torch.stack(processed_signals)
 
     # Remise en forme standard (Batch, Channels, Time)
     padded_signals = padded_batch.transpose(1, 2)
 
-    # Empilage des labels (Taille fixe, donc un simple stack suffit)
+    # Empilage des labels
     stacked_labels = torch.stack(labels)
 
     return padded_signals, stacked_labels
