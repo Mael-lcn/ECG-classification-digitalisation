@@ -3,7 +3,10 @@ import json
 import argparse
 import re
 import time
-import multiprocessing, partial
+
+import multiprocessing
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,8 +14,8 @@ from tqdm import tqdm
 import wandb  # Librairie de monitoring
 
 from torch.utils.data import DataLoader
-from dataset import LargeH5Dataset, ecg_collate_wrapper
-from cnn import CNN
+from Dataset import LargeH5Dataset, ecg_collate_wrapper
+from Cnn import CNN
 from Sampler import MegaBatchSortishSampler
 
 
@@ -159,7 +162,7 @@ def run(args):
     val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
 
     collate_fn = partial(ecg_collate_wrapper, 
-                     padding_mode=args.padding_mode)
+                     universel_padding=args.universel_padding)
 
     # Dataloader de Training
     train_loader = DataLoader(
@@ -316,18 +319,20 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--patience', type=int, default=5, help="Nb époques sans amélioration avant arrêt")
-    parser.add_argument('--padding_mode', action='store_false', default=True, 
-                    help="True (par défaut) formate les batchs à la taille max du lot. False force la taille universelle.")
+    parser.add_argument('--universel_padding', action='store_true', default=False, 
+                    help="False (par défaut) formate les batchs à une taille universelle. False force la taille au max du lot.")
 
     # Arguments Système
-    parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count()-2, 
+    parser.add_argument('--workers', type=int, default=min(8, multiprocessing.cpu_count()-2), 
                         help="Nombre de processus pour charger les données")
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")
-    parser.add_argument('--use_vectorize_infer', action='store_true', 
-                        help="Argument optionnel pour future fonctionnalité d'inférence vectorisée")
 
     args = parser.parse_args()
+
+
+    # Config PyTorch pour éviter la fragmentation CUDA
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
     # Lancement
     run(args)

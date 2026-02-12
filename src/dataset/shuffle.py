@@ -1,9 +1,9 @@
-import os
+import os, sys
 import argparse
 import time
 import glob
 import numpy as np
-import pandas as pd
+import pandas as pd, gc
 import h5py
 import multiprocessing
 from tqdm import tqdm
@@ -96,8 +96,8 @@ def scan_sources_and_map_indices(input_dir):
     print(f"-> {len(df_mapping)} IDs trouvés physiquement dans les HDF5.")
 
     print("\n--- 3. Fusion et Validation (Inner Join) ---")
-    # On ne garde que l'intersection parfaite.
-    # Le CSV apporte les métadonnées (patient_id), le Mapping apporte l'adresse physique (path + index).
+    # On ne garde que l'intersection parfaite
+    # Le CSV apporte les métadonnées (patient_id), le Mapping apporte l'adresse physique (path + index)
     merged_df = pd.merge(full_csv, df_mapping, on='exam_id', how='inner')
 
     print(f"-> {len(merged_df)} paires valides (CSV + HDF5) prêtes au traitement.")
@@ -108,146 +108,128 @@ def scan_sources_and_map_indices(input_dir):
     return merged_df
 
 
+
 def write_shard_task(task_config):
     """
-    Fonction Worker exécutée par un processus enfant pour générer un unique 'shard' (fichier HDF5 + CSV).
-
-    1. Elle reçoit un sous-ensemble du DataFrame global (l'inventaire).
-    2. Elle groupe les requêtes par fichier source HDF5 pour minimiser les ouvertures/fermetures de fichiers.
-    3. Elle lit les données (tracings) et les IDs de manière vectorisée.
-    4. Elle écrit le nouveau fichier HDF5 et le CSV associé.
-
-    Args:
-        task_config (dict): Un dictionnaire de configuration contenant :
-            - 'output_path' (str): Le chemin complet du fichier HDF5 à créer.
-            - 'inventory_df' (pd.DataFrame): Le sous-ensemble du DataFrame contenant 
-              la liste des examens à écrire dans ce shard, incluant la colonne 'h5_idx_src'.
-
-    Returns:
-        str: Un message de statut indiquant le succès ("OK: ...") ou l'échec ("CRASH: ...").
-             En cas de succès, inclut le nombre d'échantillons écrits.
+    Worker ultra-optimisé pour la RAM (Streaming Direct-to-Disk).
     
-    Raises:
-        AssertionError: Si une incohérence est détectée entre la taille des données lues
-        et la taille des métadonnées attendues avant l'écriture.
+    Format : PyTorch (B, C, T).
+    Optimisations :
+    - Pas de buffer NumPy géant en RAM (Écriture directe dans HDF5).
+    - Tri et déduplication des index pour éviter les erreurs H5Py.
+    - Garbage collection explicite entre chaque source.
     """
     shard_path = task_config['output_path']
-    # Le DataFrame reçu contient déjà 'trace_file' et 'h5_idx_src' corrects
-    inventory_df = task_config['inventory_df'].copy()
-
-    # Réinitialiser l'index pour avoir un ordre 0..N propre pour ce shard
-    inventory_df = inventory_df.reset_index(drop=True)
+    inventory_df = task_config['inventory_df'].copy().reset_index(drop=True)
     inventory_df['shard_local_idx'] = inventory_df.index
-
     total_samples = len(inventory_df)
+
     if total_samples == 0:
-        return "Shard Vide"
+        return f"SKIP: {os.path.basename(shard_path)}"
 
-    # Conteneurs RAM
-    tracings_data = None
-    exam_ids_data = [None] * total_samples
+    # --- 1. SCAN DYNAMIQUE (Passe 1) ---
+    # On identifie le T_max pour pré-allouer le fichier sur disque
+    local_max_time = 0
+    unique_sources = inventory_df['trace_file'].unique()
 
-    # On groupe par fichier source pour ne l'ouvrir qu'une fois
-    grouped = inventory_df.groupby('trace_file')
-
-    # Détection dynamique de la shape
-    time_dim = 0
-    n_channels = 0
-
-    # Gestion des erreurs locales
-    failed_indices = []
-
-    for source_path, group in grouped:
-        try:
-            # Tri par index source croissant pour optimiser la lecture disque
-            group_sorted = group.sort_values('h5_idx_src')
-
-            src_indices = group_sorted['h5_idx_src'].values
-            dest_indices = group_sorted['shard_local_idx'].values
-
-            with h5py.File(source_path, 'r') as f_in:
-                # Init buffer si premier passage
-                if tracings_data is None:
-                    dset_shape = f_in['tracings'].shape
-                    time_dim = dset_shape[1]
-                    n_channels = dset_shape[2] if len(dset_shape) > 2 else 12
-                    tracings_data = np.zeros((total_samples, time_dim, n_channels), dtype='f4')
-
-                # Lecture vectorisée
-                raw_tracings = f_in['tracings'][src_indices]
-                raw_ids = f_in['exam_id'][src_indices]
-
-                # Écriture RAM
-                tracings_data[dest_indices] = raw_tracings
-
-                # Conversion ID
-                for i, raw_id in enumerate(raw_ids):
-                    target_idx = dest_indices[i]
-                    exam_ids_data[target_idx] = normalize_id(raw_id)
-
-        except Exception as e:
-            # Si un fichier source plante, on note les indices locaux échoués
-            failed_idx = group['shard_local_idx'].values
-            failed_indices.extend(failed_idx)
-
-    # Filtrage post-lecture (si échecs I/O)
-    valid_mask = np.ones(total_samples, dtype=bool)
-    if failed_indices:
-        valid_mask[failed_indices] = False
-
-    # On vérifie aussi qu'on n'a pas de None dans les IDs (double check)
-    for i in range(total_samples):
-        if exam_ids_data[i] is None:
-            valid_mask[i] = False
-
-    final_tracings = tracings_data[valid_mask] if tracings_data is not None else np.array([])
-    final_ids_list = [exam_ids_data[i] for i in range(total_samples) if valid_mask[i]]
-    final_df = inventory_df[valid_mask].copy()
-
-    if len(final_df) == 0:
-        return f"Shard {os.path.basename(shard_path)} : VIDE après filtrage erreurs."
-
-    # Assertions de Sécurité
-    # C'est ce qui garantit que le CSV correspond au HDF5
-    assert len(final_df) == len(final_ids_list), "Mismatch taille CSV vs IDs"
-    assert len(final_df) == final_tracings.shape[0], "Mismatch taille CSV vs Tracings"
-
-    # --- Écriture ---
     try:
-        with h5py.File(shard_path, 'w') as f_out:
-            # Chunking activé : (1, time, 12) permet un accès rapide sample par sample
-            chunk_shape = (1, time_dim, n_channels)
+        for src in unique_sources:
+            with h5py.File(src, 'r') as f:
+                t_dim = f['tracings'].shape[2] # Format (N, 12, T)
+                if t_dim > local_max_time:
+                    local_max_time = t_dim
+    except Exception as e:
+        return f"CRASH SCAN: {e}"
 
-            f_out.create_dataset('tracings', 
-                                 data=final_tracings, 
-                                 chunks=chunk_shape, # Optimisation Training
-                                 compression="gzip", 
-                                 compression_opts=4)
+    # --- 2. PRÉ-ALLOCATION HDF5 ---
+    n_channels = 12
+    try:
+        # On crée le fichier et le dataset immédiatement
+        f_out = h5py.File(shard_path, 'w')
 
-            dt_str = h5py.string_dtype(encoding='utf-8')
-            f_out.create_dataset('exam_id', 
-                                 data=np.array(final_ids_list, dtype=object), 
-                                 dtype=dt_str)
+        # Dataset pré-rempli de zéros par HDF5 sur le disque (fillvalue=0)
+        dset_tracings = f_out.create_dataset(
+            'tracings', 
+            shape=(total_samples, n_channels, local_max_time),
+            dtype='f4',
+            chunks=(1, n_channels, local_max_time),
+            compression="gzip",
+            compression_opts=4,
+            fillvalue=0.0 
+        )
 
-        # Préparation CSV Final
-        csv_path = shard_path.replace('.hdf5', '.csv')
-
-        # Mise à jour du chemin source : pointe maintenant vers le nouveau shard
-        final_df['trace_file'] = os.path.basename(shard_path)
-
-        # Nettoyage colonnes techniques
-        if 'split' in final_df.columns:
-            final_df = final_df.drop(columns=['split'])
-
-        cols_drop = ['shard_local_idx', 'h5_idx_src']
-        final_df = final_df.drop(columns=[c for c in cols_drop if c in final_df.columns])
-
-        final_df.to_csv(csv_path, index=False)
-
-        return f"OK: {os.path.basename(shard_path)} ({len(final_df)} samples)"
+        # Buffer temporaire pour les IDs
+        exam_ids_data = [None] * total_samples
 
     except Exception as e:
-        return f"CRASH: {os.path.basename(shard_path)} - {e}"
+        if 'f_out' in locals(): f_out.close()
+        return f"CRASH INIT: {e}"
+
+    # 3. STREAMING DES DONNÉES
+    grouped = inventory_df.groupby('trace_file')
+    
+    for source_path, group in grouped:
+        try:
+            # Indices sources et destinations
+            req_src_idx = group['h5_idx_src'].values
+            req_dest_idx = group['shard_local_idx'].values
+
+            # H5Py exige des index triés et uniques pour les lectures vectorisées
+            unique_src_idx, inverse_map = np.unique(req_src_idx, return_inverse=True)
+
+            with h5py.File(source_path, 'r') as f_in:
+                # Lecture du petit bloc
+                # On force f4 (float32)
+                raw_chunk = f_in['tracings'][unique_src_idx].astype('f4')
+                raw_ids = f_in['exam_id'][unique_src_idx]
+
+                # Reconstruction du batch
+                batch_data = raw_chunk[inverse_map]
+                batch_ids = raw_ids[inverse_map]
+                
+                t_src = batch_data.shape[2]
+
+                # ÉCRITURE DIRECTE SUR DISQUE
+                # Le padding est automatique : on n'écrit que sur :t_src
+                # HDF5 garde le reste à 0 grâce au fillvalue.
+                for i, d_idx in enumerate(req_dest_idx):
+                    dset_tracings[d_idx, :, :t_src] = batch_data[i]
+                    exam_ids_data[d_idx] = normalize_id(batch_ids[i])
+
+                # Libération RAM immédiate
+                del raw_chunk, raw_ids, batch_data, batch_ids
+                gc.collect()
+
+        except Exception as e:
+            # On log l'erreur mais on continue pour les autres sources
+            print(f"[ERR] Source {os.path.basename(source_path)} ignorée: {e}", file=sys.stderr)
+
+    # --- 4. FINALISATION ---
+    try:
+        # Écriture des IDs à la fin
+        # On filtre les éventuels None (si une source a crashé)
+        valid_ids = [id_ if id_ is not None else "ERROR" for id_ in exam_ids_data]
+        
+        dt_str = h5py.string_dtype(encoding='utf-8')
+        f_out.create_dataset('exam_id', data=np.array(valid_ids, dtype=object), dtype=dt_str)
+        
+        f_out.close() # Fermeture propre du fichier HDF5
+
+        # Écriture du CSV compagnon
+        csv_path = shard_path.replace('.hdf5', '.csv')
+        # On ne garde que les lignes où l'ID a bien été écrit
+        mask_valid = [id_ is not None for id_ in exam_ids_data]
+        final_df = inventory_df[mask_valid].copy()
+        
+        final_df['trace_file'] = os.path.basename(shard_path)
+        final_df = final_df.drop(columns=['shard_local_idx', 'h5_idx_src', 'split'], errors='ignore')
+        final_df.to_csv(csv_path, index=False)
+
+        return f"OK: {os.path.basename(shard_path)} (T={local_max_time})"
+
+    except Exception as e:
+        if 'f_out' in locals(): f_out.close()
+        return f"CRASH FINAL: {e}"
 
 
 
@@ -285,7 +267,7 @@ def run(args):
         return
 
     # Split par patient
-    print("\n--- Split Train/Val/Test (Patient Aware) ---")
+    print("\n--- Split Train/Val/Test ---")
     patients = full_df['patient_id'].unique()
     np.random.shuffle(patients)
 
@@ -357,14 +339,14 @@ def main():
         description="Outil de Shuffling et Sharding Offline pour Datasets HDF5 Massifs."
     )
 
-    parser.add_argument('-i', '--input', type=str, default='../../../data/15_prct/',
+    parser.add_argument('-i', '--input', type=str, default='../output/normalize_data/',
                         help='Dossier source contenant les paires .hdf5 et .csv')
 
     parser.add_argument('-o', '--output', type=str, default='../output/final_data/',
                         help='Dossier destination où seront créés les nouveaux fichiers')
 
-    parser.add_argument('-s', '--shard_size', type=int, default=10000,
-                        help='Nombre cible d\'échantillons par fichier de sortie (Défaut: 10k)')
+    parser.add_argument('-s', '--shard_size', type=int, default=8000,
+                        help='Nombre cible d\'échantillons par fichier de sortie (Défaut: 8k)')
 
     parser.add_argument('--train_prct', type=float, default=0.80, help='Ratio Train (0-1)')
     parser.add_argument('--val_prct', type=float, default=0.10, help='Ratio Validation (0-1)')
@@ -375,6 +357,7 @@ def main():
     args = parser.parse_args()
 
     run(args)
+
 
 if __name__ == '__main__':
     main()

@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+# On ajoute le dossier parent de 'src' au chemin de recherche
+root = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root))
+
 import h5py
 import glob
 import os
@@ -88,8 +95,7 @@ class LargeH5Dataset(Dataset):
         # Calcul la taille cumulé
         for p in self.h5_paths:
             with h5py.File(p, 'r') as f:
-                n_samples = f['exam_id'].shape[0]
-                cumul += n_samples
+                cumul += f['exam_id'].shape[0]
 
             self.cumulative_sizes.append(cumul)
 
@@ -126,7 +132,7 @@ class LargeH5Dataset(Dataset):
         else:
             local_idx = idx - self.cumulative_sizes[file_idx - 1]
 
-        # B. Gestion des ressources (Fichiers)
+        # B. Gestion des ressources
         # Si le fichier demandé n'est pas celui actuellement ouvert, on change de fichier
         if self.current_file_idx != file_idx:
             self.load_new_file_resources(file_idx)
@@ -143,12 +149,11 @@ class LargeH5Dataset(Dataset):
             exam_id_str = str(raw_id)
 
         # E. Récupération du Label
-        # O(1) : On pioche dans le dictionnaire pré-chargé en mémoire
+        # On pioche dans le dictionnaire pré-chargé en mémoire
         label_vec = self.current_labels_map.get(exam_id_str)
 
         # F. Conversion en Tensors PyTorch
-        # Transpose : Les modèles Conv1D attendent (Batch, Channels, Time)
-        tracing_tensor = torch.from_numpy(tracing_data).float().transpose(0, 1)
+        tracing_tensor = torch.from_numpy(tracing_data).float()
         label_tensor = torch.from_numpy(label_vec).float()
 
         return tracing_tensor, label_tensor
@@ -186,6 +191,12 @@ class LargeH5Dataset(Dataset):
         # Mise à jour de l'état
         self.current_file_idx = file_idx
 
+        # Debug
+        if self.file_handle['tracings'].shape[0] * self.file_handle['tracings'].shape[1] > 1_000_000:
+            print(f"Fichier : {self.h5_paths[file_idx]}")
+            print(f"Shape lue : {self.file_handle['tracings'].shape}")
+            raise ValueError("Signal aberrant")
+
 
     def __del__(self):
         """
@@ -204,18 +215,18 @@ class LargeH5Dataset(Dataset):
 
 
 
-def ecg_collate_wrapper(batch, mode_batch=True, fixed_length=MAX_SIGNAL_LENGTH):
+def ecg_collate_wrapper(batch, universel_padding=True, fixed_length=MAX_SIGNAL_LENGTH):
     """
     Transforme une liste d'échantillons de tailles variables en un Batch PyTorch.
 
     Cette fonction harmonise les dimensions temporelles des signaux pour qu'ils puissent être empilés dans un seul tenseur.
     
-    Elle propose deux stratégies via 'mode_batch' :
-    1. mode_batch=True (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
+    Elle propose deux stratégies via 'universel_padding' :
+    1. universel_padding=False (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
        Le batch est paddé à la longueur du signal le plus long de ce batch.
        Ex: Si le max du batch est 4500, tout le monde est paddé à 4500.
        
-    2. mode_batch=False (Universel) : Idéal pour les CNN classiques (avec couches Dense).
+    2. universel_padding=True (Universel) : Idéal pour les CNN classiques (avec couches Dense).
        Le batch est forcé à une taille fixe 'fixed_length'.
        - Trop court ? Padding (zéros à la fin).
        - Trop long ? Cropping (on coupe la fin).
@@ -224,7 +235,7 @@ def ecg_collate_wrapper(batch, mode_batch=True, fixed_length=MAX_SIGNAL_LENGTH):
         batch (list): Liste de tuples [(signal, label), ...] fournie par le Dataset.
                       - signal : Tensor de forme (Channels=12, Time=Variable)
                       - label  : Tensor de forme (NumClasses,) ou scalaire.
-        mode_batch (bool): Si True, utilise le padding dynamique (max du batch).
+        universel_padding (bool): Si True, utilise le padding dynamique (max du batch).
                            Si False, force la taille 'fixed_length'.
         fixed_length (int): La taille cible temporelle (T) pour le mode universel.
 
@@ -237,13 +248,13 @@ def ecg_collate_wrapper(batch, mode_batch=True, fixed_length=MAX_SIGNAL_LENGTH):
     signals = [item[0].T for item in batch]  
     labels = [item[1] for item in batch]
 
-    # --- Option 1 : Padding dynamique ---
-    if mode_batch:
-        # pad_sequence trouve automatiquement le max du batch et comble les trous.
+    # Option 1 : Padding dynamique
+    if not universel_padding:
+        # pad_sequence trouve automatiquement le max du batch et comble les trous
         # batch_first=True -> Sortie : (Batch, Max_Time_du_Batch, 12)
         padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)
 
-    # --- Option 2 : Padding/Cropping fixe ---
+    # Option 2 : Padding/Cropping fixe
     else:
         # On doit traiter chaque signal individuellement pour atteindre 'fixed_length'
         processed_signals = []

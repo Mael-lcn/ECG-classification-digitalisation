@@ -64,6 +64,7 @@ def load_metadata(path_h5, path_csv):
     """
     # Lecture du CSV
     csv_data = pd.read_csv(path_csv)
+    csv_data.drop(columns=['nn_predicted_age'], inplace=True, errors='ignore')
 
     # Ouverture du HDF5 pour extraire les IDs
     with h5py.File(path_h5, 'r') as f:

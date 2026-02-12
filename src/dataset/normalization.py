@@ -22,6 +22,15 @@ VRAM_LIMIT_GB = 8.5
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
+# Suivi du record de taille
+global_stats = {
+    'max_t': 0,
+    'file_origin': "",
+    'exam_id': "",
+    'freq': 0
+}
+stats_lock = threading.Lock()
+
 
 def estimate_vram_gb(path_h5):
     """
@@ -38,6 +47,7 @@ def estimate_vram_gb(path_h5):
         return 0.5
 
 
+# TODO Freq n'est pas maj et rename de normal_ecg -> SNR non plus (meme si je ne suis pas sur qu'il soit pertinent)
 def unified_worker(task, output):
     """
     Worker optimisé pour le traitement ECG haute performance sous contrainte VRAM.
@@ -133,7 +143,7 @@ def unified_worker(task, output):
 
             # F. Nettoyage GPU
             del chunk_gpu, s_idx, e_idx
-            
+
             print(f"   -> [{name}] {i+1}/{fragment_factor} processed.", flush=True)
 
         # Assemblage final sur CPU
@@ -179,6 +189,30 @@ def unified_worker(task, output):
 
         if mode != 'D1':
             final_csv.rename(columns={"normal_ecg": "NSR"}, inplace=True)
+
+        current_lengths = np.concatenate(all_lengths)
+        local_max_idx = np.argmax(current_lengths)
+        local_max_val = current_lengths[local_max_idx]
+
+        with stats_lock:
+            if local_max_val > global_stats['max_t']:
+                global_stats['max_t'] = local_max_val
+                global_stats['file_origin'] = name
+
+                # Récupération de l'ID du record
+                target_id = final_h5_ids[local_max_idx]
+                global_stats['exam_id'] = target_id
+
+                try:
+                    # On filtre csv_full pour trouver la fréquence associée à cet ID
+                    record_row = csv_full[csv_full['exam_id'].astype(str) == str(target_id)]
+                    if not record_row.empty:
+                        # On prend la première valeur trouvée dans la colonne 'frequences'
+                        global_stats['freq'] = record_row['frequences'].values[0]
+                    else:
+                        global_stats['freq'] = "ID non trouvé"
+                except Exception:
+                    global_stats['freq'] = "Erreur lecture"
 
         # Save
         write_results(dataset, final_csv, name, output)
@@ -244,6 +278,17 @@ def run(args):
         list(tqdm(pool.imap_unordered(worker_func, all_tasks), 
                   total=len(all_tasks), 
                   desc='Global Preprocessing'))
+
+    if global_stats['max_t'] > 0:
+        print("\n" + "="*60)
+        print("RECORD DU PLUS GRAND SIGNAL")
+        print("-"*60)
+        print(f"ID Examen      : {global_stats['exam_id']}")
+        print(f"Fichier Source : {global_stats['file_origin']}")
+        print(f"Taille brute   : {global_stats['max_t']} points")
+        print(f"Fréq. d'origine: {global_stats['freq']} Hz")
+        print(f"Durée réelle   : {global_stats['max_t'] / TARGET_FREQ:.2f} secondes (à {TARGET_FREQ}Hz)")
+        print("="*60 + "\n")
 
     elapsed = time.time() - start_time
     print(f"\nPipeline terminée en {int(elapsed // 60)}m {int(elapsed % 60)}s.")
