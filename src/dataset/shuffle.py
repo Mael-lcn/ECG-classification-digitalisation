@@ -349,7 +349,7 @@ def main():
     parser.add_argument('-o', '--output', type=str, default='../output/final_data/',
                         help='Dossier destination où seront créés les nouveaux fichiers')
 
-    parser.add_argument('-s', '--shard_size', type=int, default=8,
+    parser.add_argument('-s', '--shard_size', type=int, default=8000,
                         help='Nombre cible d\'échantillons par fichier de sortie (Défaut: 8K)')
 
     parser.add_argument('--train_prct', type=float, default=0.80, help='Ratio Train (0-1)')
