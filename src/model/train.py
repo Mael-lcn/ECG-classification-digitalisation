@@ -15,8 +15,10 @@ import wandb  # Librairie de monitoring
 
 from torch.utils.data import DataLoader
 from Dataset import LargeH5Dataset, ecg_collate_wrapper
-from Cnn import CNN
 from Sampler import MegaBatchSortishSampler
+
+from Cnn import CNN
+from Fcnn import FCNN
 
 
 
@@ -137,12 +139,20 @@ def run(args):
     os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
+
+    pad_status = "UnivPad" if args.enable_universel_padding else "MaxPad"
+
+    exp_name = f"EXP_{ model_list[args.model].__name__}_bs{args.batch_size}_lr{args.lr} \
+            _ep{args.epochs}_{pad_status}_{args.patience}"
+
+    # Construction du nom d'expérience
     wandb.init(
         project="ECG_Classification_Experiments",
         config=args,
-        name=f"offline_run_bs{args.batch_size}_lr{args.lr}"
+        name=exp_name
     )
 
+    print(f"Début de {exp_name}")
 
     # Préparation des données
     print(f"[INIT] Chargement des classes depuis : {args.class_map}")
@@ -162,7 +172,7 @@ def run(args):
     val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
 
     collate_fn = partial(ecg_collate_wrapper, 
-                     universel_padding=args.universel_padding)
+                     universel_padding=args.enable_universel_padding)
 
     # Dataloader de Training
     train_loader = DataLoader(
@@ -192,15 +202,15 @@ def run(args):
     if torch.cuda.is_available():
         device = torch.device("cuda")
         use_amp = True
-        torch.backends.cudnn.benchmark = True # Optimise les algos de convolution
+        torch.backends.cudnn.benchmark = True # Optimise les algos de convolution via triton
         print("[INIT] Mode: CUDA (NVIDIA)")
     else:
         device = torch.device("cpu")
         use_amp = False
         print("[INIT] Mode: CPU (Lent)")
 
-    print(f"[MODEL] Création du modèle pour {num_classes} classes...")
-    model = CNN(num_classes=num_classes).to(device)
+    print(f"[MODEL] Création du modèle {model_list[args.model].__name__} pour {num_classes} classes...")
+    model = model_list[args.model](num_classes=num_classes).to(device)
 
     try:
         model = torch.compile(model)
@@ -296,13 +306,19 @@ def run(args):
 
 
 
+model_list = [CNN, FCNN]
+
+
 def main():
     """
     Point d'entrée du script. Parse les arguments CLI.
     """
+    options = ", ".join([f"{i}: {model}" for i, model in enumerate(model_list)])
+
+
     parser = argparse.ArgumentParser(description="Script d'entraînement ECG avec WandB")
 
-    # Arguments Fichiers
+    # Arguments du script
     parser.add_argument('--train_data', type=str, default="../output/final_data/train", 
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../output/final_data/val", 
@@ -313,17 +329,21 @@ def main():
                         help="Dossier où sauvegarder les poids (.pt)")
     parser.add_argument('--output', type=str, default='../output/',
                         help="Dossier de sortie standart")
+    parser.add_argument('--output', type=str, default='../output/',
+                        help="Dossier de sortie standart")
+    parser.add_argument('--model', type=int, default=0,
+                        help=f"Quel modèle voulez-vous entrainer: {options}")
 
-    # Arguments Hyperparamètres
+    # Arguments du modèle (Hyperparamètres)
     parser.add_argument('--batch_size', type=int, default=64, help="Taille du batch")
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
-    parser.add_argument('--patience', type=int, default=5, help="Nb époques sans amélioration avant arrêt")
-    parser.add_argument('--universel_padding', action='store_true', default=False, 
+    parser.add_argument('--patience', type=int, default=6, help="Nb époques sans amélioration avant arrêt")
+    parser.add_argument('--enable_universel_padding', action='store_true', default=False, 
                     help="False (par défaut) formate les batchs à une taille universelle. False force la taille au max du lot.")
 
     # Arguments Système
-    parser.add_argument('--workers', type=int, default=min(8, multiprocessing.cpu_count()-2), 
+    parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count(),
                         help="Nombre de processus pour charger les données")
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")

@@ -156,6 +156,12 @@ class LargeH5Dataset(Dataset):
         tracing_tensor = torch.from_numpy(tracing_data).float()
         label_tensor = torch.from_numpy(label_vec).float()
 
+        # Corrige les lables Nan
+        if torch.isnan(label_tensor).any():
+            print(f"[NaN FATAL] Label corrompu pour {exam_id_str}")
+            label_tensor = torch.nan_to_num(label_tensor, nan=0.0)
+
+
         return tracing_tensor, label_tensor
 
 
@@ -182,6 +188,9 @@ class LargeH5Dataset(Dataset):
         # `reindex` ajoute des 0 si une classe est manquante dans ce fichier CSV
         df_labels = df.reindex(columns=self.classes, fill_value=0)
 
+        df_labels.fillna(0.0, inplace=True)
+
+
         labels_matrix = df_labels.astype(np.float32).values
         ids = df['exam_id'].astype(str).values
 
@@ -190,12 +199,6 @@ class LargeH5Dataset(Dataset):
 
         # Mise à jour de l'état
         self.current_file_idx = file_idx
-
-        # Debug
-        if self.file_handle['tracings'].shape[0] * self.file_handle['tracings'].shape[1] > 1_000_000:
-            print(f"Fichier : {self.h5_paths[file_idx]}")
-            print(f"Shape lue : {self.file_handle['tracings'].shape}")
-            raise ValueError("Signal aberrant")
 
 
     def __del__(self):
