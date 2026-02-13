@@ -139,7 +139,7 @@ def run(args):
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
 
-    pad_status = "UnivPad" if args.enable_universel_padding else "MaxPad"
+    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
 
     exp_name = f"EXP_{ model_list[args.model].__name__}_bs{args.batch_size}_lr{args.lr} \
             _ep{args.epochs}_{pad_status}_{args.patience}"
@@ -166,13 +166,13 @@ def run(args):
     train_ds = LargeH5Dataset(
         input_dir=args.train_data,
         classes_list=loaded_classes,
-        active_universel_padding=args.active_universel_padding
+        use_static_padding=args.use_static_padding
     )
 
     val_ds = LargeH5Dataset(
         input_dir=args.val_data,
         classes_list=loaded_classes,
-        active_universel_padding=args.active_universel_padding
+        use_static_padding=args.use_static_padding
     )
 
     # Sampler
@@ -180,7 +180,7 @@ def run(args):
     val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
 
     collate_fn = partial(ecg_collate_wrapper, 
-                     active_universel_padding=args.active_universel_padding)
+                     use_static_padding=args.use_static_padding)
 
     # Dataloader de Training
     train_loader = DataLoader(
@@ -343,8 +343,13 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--patience', type=int, default=6, help="Nb époques sans amélioration avant arrêt")
-    parser.add_argument('--active_universel_padding', action='store_false', default=True, 
-                    help="False (par défaut) formate les batchs à une taille universelle. False force la taille au max du lot.")
+    parser.add_argument(
+        '--use_static_padding', 
+        action='store_true', 
+        default=False,
+        help="Si activé, force une taille de padding fixe (universelle) pour tous les batchs. "
+            "Par défaut, le padding est dynamique (ajusté à la longueur max du lot actuel)."
+    )
 
     # Arguments Système
     parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count(),

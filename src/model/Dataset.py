@@ -47,7 +47,7 @@ class LargeH5Dataset(Dataset):
         total_length (int): Nombre total d'échantillons disponibles.
     """
 
-    def __init__(self, input_dir, classes_list, active_universel_padding=False):
+    def __init__(self, input_dir, classes_list, use_static_padding=False):
         """
         Initialise le dataset en scannant le répertoire cible.
 
@@ -59,7 +59,7 @@ class LargeH5Dataset(Dataset):
         self.classes = classes_list
         self.num_classes = len(classes_list)
 
-        self.active_universel_padding = active_universel_padding
+        self.use_static_padding = use_static_padding
 
         # Ces variables servent à garder le fichier courant ouvert
         self.file_handle = None          # Pointeur vers le fichier H5 ouvert
@@ -163,7 +163,7 @@ class LargeH5Dataset(Dataset):
         length = self.current_lenghts[local_idx]
 
         # Si on garde le padding
-        if self.active_universel_padding:
+        if self.use_static_padding:
             tracing_tensor = torch.from_numpy(tracing_data).float()
         else:
             # Récupère la partie T utile
@@ -241,18 +241,18 @@ class LargeH5Dataset(Dataset):
 
 
 
-def ecg_collate_wrapper(batch, active_universel_padding=False, fixed_length=MAX_SIGNAL_LENGTH):
+def ecg_collate_wrapper(batch, use_static_padding=False, fixed_length=MAX_SIGNAL_LENGTH):
     """
     Transforme une liste d'échantillons de tailles variables en un Batch PyTorch.
 
     Cette fonction harmonise les dimensions temporelles des signaux pour qu'ils puissent être empilés dans un seul tenseur.
     
-    Elle propose deux stratégies via 'active_universel_padding' :
-    1. active_universel_padding=False (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
+    Elle propose deux stratégies via 'use_static_padding' :
+    1. use_static_padding=False (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
        Le batch est paddé à la longueur du signal le plus long de ce batch.
        Ex: Si le max du batch est 4500, tout le monde est paddé à 4500.
        
-    2. active_universel_padding=True (Universel) : Idéal pour les CNN classiques (avec couches Dense).
+    2. use_static_padding=True (Universel) : Idéal pour les CNN classiques (avec couches Dense).
        Le batch est forcé à une taille fixe 'fixed_length'.
        - Trop court ? Padding (zéros à la fin).
        - Trop long ? Cropping (on coupe la fin).
@@ -261,7 +261,7 @@ def ecg_collate_wrapper(batch, active_universel_padding=False, fixed_length=MAX_
         batch (list): Liste de tuples [(signal, label), ...] fournie par le Dataset.
                       - signal : Tensor de forme (Channels=12, Time=Variable)
                       - label  : Tensor de forme (NumClasses,) ou scalaire.
-        active_universel_padding (bool): Si True, utilise le padding universel.
+        use_static_padding (bool): Si True, utilise le padding universel.
                            Si False pad dynamyquement.
         fixed_length (int): La taille cible temporelle (T) pour le mode universel.
 
@@ -275,7 +275,7 @@ def ecg_collate_wrapper(batch, active_universel_padding=False, fixed_length=MAX_
     signals = [s.T for s in signals]
 
     # Option 1 : Padding dynamique
-    if not active_universel_padding:
+    if not use_static_padding:
         # pad_sequence trouve automatiquement le max du batch et comble les trous
         # batch_first=True -> Sortie : (Batch, Max_Time_du_Batch, 12)
         padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)

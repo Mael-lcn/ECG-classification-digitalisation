@@ -71,7 +71,7 @@ def unified_worker(task, output):
 
     with vram_lock:
         # Si on a assez de VRAM ou que aucun file n'est traité, on autorise le traitement
-        while (current_vram_usage + cost > VRAM_LIMIT_GB): #and (current_vram_usage > 0):
+        while (current_vram_usage + cost > VRAM_LIMIT_GB) and (current_vram_usage > 0.1):
             vram_lock.wait()
 
         current_vram_usage += cost
