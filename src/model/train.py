@@ -3,6 +3,7 @@ import json
 import argparse
 import re
 import time
+import math
 
 import multiprocessing
 from functools import partial
@@ -16,9 +17,13 @@ import wandb  # Librairie de monitoring
 from torch.utils.data import DataLoader
 from Dataset import LargeH5Dataset, ecg_collate_wrapper
 from Sampler import MegaBatchSortishSampler
+import torch._dynamo
 
 from Cnn import CNN
 
+
+# Supprime la limite de recompilation
+torch._dynamo.config.recompile_limit = 6000
 
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
@@ -47,7 +52,7 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 
     for batch in loop:
         # Récupération des données et envoi sur GPU
-        tracings, targets = batch
+        tracings, targets, _ = batch
         tracings = tracings.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -72,11 +77,24 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 
         # Calcul des stats
         loss_val = loss.item()
-        total_loss += loss_val
-        count += 1
 
-        # Mise à jour de la barre de progression
-        loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{total_loss/count:.4f}")
+        # Vérification mathématique (True si c'est un vrai nombre, False si NaN ou Inf)
+        if math.isfinite(loss_val):
+            total_loss += loss_val
+            count += 1
+            # Mise à jour de la barre de progression uniquement si tout va bien
+            loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{total_loss/count:.4f}")
+
+        else:
+            log_message = f"CRITICAL: Loss invalide ({loss_val}) - Epoch {epoch}/{total_epochs} - Batch index {count} \
+                and tracing = {targets}\n"
+
+            # On s'assure que le dossier existe
+            os.makedirs("output", exist_ok=True)
+
+            # On écrit dans le fichier en mode 'a' (append) pour ne pas écraser les erreurs précédentes
+            with open("output/train_log.txt", "a") as f:
+                f.write(log_message)
 
     return total_loss / count if count > 0 else 0.0
 
@@ -249,7 +267,7 @@ def run(args):
     # Boucle d'Entraînement
     print(f"\n[TRAIN] Début de l'entraînement pour {args.epochs} époques.")
     stagnation_counter = 0
-    
+
     train_start_time = time.time()
 
     for epoch in range(start_epoch, args.epochs + 1):

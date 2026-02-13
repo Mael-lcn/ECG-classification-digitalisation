@@ -190,7 +190,7 @@ def write_shard_task(task_config):
                 # Reconstruction du batch
                 batch_data = raw_chunk[inverse_map]
                 batch_ids = raw_ids[inverse_map]
-                
+
                 t_src = batch_data.shape[2]
 
                 # ÉCRITURE DIRECTE SUR DISQUE
