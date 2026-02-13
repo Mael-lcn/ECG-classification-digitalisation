@@ -10,7 +10,7 @@ class FCNN(nn.Module):
         ch1: int = 32,
         ch2: int = 64,
         ch3: int = 128,
-        kernel_size: int = 7,
+        kernel_size: int = 3,
         window_size: int = 4000,  # kernel size of the last convolution
         dropout: float = 0.5,
         use_batchnorm: bool = True
