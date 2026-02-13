@@ -18,7 +18,6 @@ from Dataset import LargeH5Dataset, ecg_collate_wrapper
 from Sampler import MegaBatchSortishSampler
 
 from Cnn import CNN
-from Fcnn import FCNN
 
 
 
@@ -164,15 +163,24 @@ def run(args):
     print(f"[DATA] Val:   {args.val_data}")
 
     # Dataset
-    train_ds = LargeH5Dataset(input_dir=args.train_data, classes_list=loaded_classes)
-    val_ds = LargeH5Dataset(input_dir=args.val_data, classes_list=loaded_classes)
+    train_ds = LargeH5Dataset(
+        input_dir=args.train_data,
+        classes_list=loaded_classes,
+        active_universel_padding=args.active_universel_padding
+    )
+
+    val_ds = LargeH5Dataset(
+        input_dir=args.val_data,
+        classes_list=loaded_classes,
+        active_universel_padding=args.active_universel_padding
+    )
 
     # Sampler
     train_sampler = MegaBatchSortishSampler(train_ds, batch_size=args.batch_size, shuffle=True)
     val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
 
     collate_fn = partial(ecg_collate_wrapper, 
-                     universel_padding=args.enable_universel_padding)
+                     active_universel_padding=args.active_universel_padding)
 
     # Dataloader de Training
     train_loader = DataLoader(
@@ -213,7 +221,7 @@ def run(args):
     model = model_list[args.model](num_classes=num_classes).to(device)
 
     try:
-        model = torch.compile(model)
+        model = torch.compile(model, dynamic=True)
     except Exception as e:
         print(f"[INFO] torch.compile ignoré : {e}")
 
@@ -293,8 +301,6 @@ def run(args):
         # F. Envoi des stats à WandB
         wandb.log(metrics)
 
-        print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val={val_loss:.4f}")
-
 
     # Enregistre le temps total et les meilleurs résultats dans le résumé du run
     wandb.run.summary["total_train_time_hours"] = (time.time() - train_start_time) / 3600
@@ -306,7 +312,7 @@ def run(args):
 
 
 
-model_list = [CNN, FCNN]
+model_list = [CNN]
 
 
 def main():
@@ -329,8 +335,6 @@ def main():
                         help="Dossier où sauvegarder les poids (.pt)")
     parser.add_argument('--output', type=str, default='../output/',
                         help="Dossier de sortie standart")
-    parser.add_argument('--output', type=str, default='../output/',
-                        help="Dossier de sortie standart")
     parser.add_argument('--model', type=int, default=0,
                         help=f"Quel modèle voulez-vous entrainer: {options}")
 
@@ -339,7 +343,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--patience', type=int, default=6, help="Nb époques sans amélioration avant arrêt")
-    parser.add_argument('--enable_universel_padding', action='store_true', default=False, 
+    parser.add_argument('--active_universel_padding', action='store_false', default=True, 
                     help="False (par défaut) formate les batchs à une taille universelle. False force la taille au max du lot.")
 
     # Arguments Système
