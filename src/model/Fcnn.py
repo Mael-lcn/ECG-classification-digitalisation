@@ -29,7 +29,7 @@ class FCNN(nn.Module):
         """
         super().__init__()
 
-        padding = kernel_size // 2
+        padding = 0
 
         # Convolutional layers
         self.conv1 = nn.Conv1d(in_channels, ch1, kernel_size, padding=padding)
