@@ -27,9 +27,8 @@ def inspect_h5(file_path):
 
                     # 1. Anomalie de Dimension
                     if len(data_shape) == 3 and name == 'tracings':
-                        # On vérifie si c'est du (N, 12, T) ou (N, T, 12)
                         # Alerte si T est délirant (ex: > 100 000 points)
-                        if data_shape[2] > 100000 or data_shape[1] > 100000:
+                        if data_shape[2] > 100000:
                             print(f"   ANOMALIE: Dimension temporelle suspecte (> 100k points) !")
 
                     # 2. Vérification du contenu (sur le premier échantillon pour aller vite)
@@ -55,6 +54,7 @@ def inspect_h5(file_path):
         print(f"Erreur lors de la lecture du fichier : {e}")
     
     print(f"\n{'='*60}\n")
+
 
 if __name__ == "__main__":
     # Utilisation : python inspect_h5.py mon_fichier.hdf5

@@ -10,6 +10,10 @@ from tqdm import tqdm
 
 
 
+# Garantit que np.random.shuffle donnera toujours le même résultat
+np.random.seed(42)
+
+
 def normalize_id(val):
     """
         Normalise une valeur d'identifiant (bytes, int ou str) en une chaîne de caractères propre.
@@ -346,7 +350,7 @@ def main():
                         help='Dossier destination où seront créés les nouveaux fichiers')
 
     parser.add_argument('-s', '--shard_size', type=int, default=8000,
-                        help='Nombre cible d\'échantillons par fichier de sortie (Défaut: 8k)')
+                        help='Nombre cible d\'échantillons par fichier de sortie (Défaut: 8K)')
 
     parser.add_argument('--train_prct', type=float, default=0.80, help='Ratio Train (0-1)')
     parser.add_argument('--val_prct', type=float, default=0.10, help='Ratio Validation (0-1)')

@@ -20,9 +20,9 @@ import torch.nn.functional as F
 from src.dataset.normalization import TARGET_FREQ
 
 
+
 MAX_TEMPS = 144
 MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
-
 
 
 class LargeH5Dataset(Dataset):
@@ -47,7 +47,7 @@ class LargeH5Dataset(Dataset):
         total_length (int): Nombre total d'échantillons disponibles.
     """
 
-    def __init__(self, input_dir, classes_list):
+    def __init__(self, input_dir, classes_list, use_static_padding=False):
         """
         Initialise le dataset en scannant le répertoire cible.
 
@@ -58,6 +58,8 @@ class LargeH5Dataset(Dataset):
         """
         self.classes = classes_list
         self.num_classes = len(classes_list)
+
+        self.use_static_padding = use_static_padding
 
         # Ces variables servent à garder le fichier courant ouvert
         self.file_handle = None          # Pointeur vers le fichier H5 ouvert
@@ -126,7 +128,7 @@ class LargeH5Dataset(Dataset):
         # A. Localisation de la donnée
         file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
 
-        # Calcul de l'index local (offset) à l'intérieur de ce fichier spécifique
+        # Calcul de l'index local à l'intérieur de ce fichier spécifique
         if file_idx == 0:
             local_idx = idx
         else:
@@ -148,15 +150,37 @@ class LargeH5Dataset(Dataset):
             # Sinon (c'est un int, un float, ou déjà une str), on convertit simplement en string
             exam_id_str = str(raw_id)
 
+        csv_id_str = self.current_csv_idx[local_idx]
+
+        # Test de désynchronisation des données
+        if exam_id_str != csv_id_str:
+            raise ValueError(f"CRITICAL DATA MISMATCH at idx {idx} (local {local_idx}): "
+                             f"H5 ID={exam_id_str} vs CSV ID={csv_id_str}. "
+                             f"Le CSV n'est pas trié dans le même ordre que le HDF5 !")
+
+        # Récupère les indexs de starts et la taille des signaux
+        start = self.current_starts[local_idx]
+        length = self.current_lenghts[local_idx]
+
+        # Si on garde le padding
+        if self.use_static_padding:
+            tracing_tensor = torch.from_numpy(tracing_data).float()
+        else:
+            # Récupère la partie T utile
+            tracing_tensor = torch.from_numpy(tracing_data[:, start : start + length]).float()
+
         # E. Récupération du Label
         # On pioche dans le dictionnaire pré-chargé en mémoire
         label_vec = self.current_labels_map.get(exam_id_str)
 
         # F. Conversion en Tensors PyTorch
-        tracing_tensor = torch.from_numpy(tracing_data).float()
         label_tensor = torch.from_numpy(label_vec).float()
 
-        return tracing_tensor, label_tensor
+        if torch.isnan(label_tensor).any():
+            raise ValueError(f"[LABEL CORRUPTED] NaN détecté dans les labels pour {exam_id_str} \n {label_tensor}")
+
+
+        return tracing_tensor, label_tensor, length
 
 
     def load_new_file_resources(self, file_idx):
@@ -174,28 +198,30 @@ class LargeH5Dataset(Dataset):
         # 2. Ouverture : Nouveau fichier HDF5
         self.file_handle = h5py.File(self.h5_paths[file_idx], 'r')
 
-        # 3. Chargement des labels
+        # 3. Chargement du csv
         df = pd.read_csv(self.csv_paths[file_idx])
+
+        # Récupère les positions effectives des tracés
+        self.current_starts = df['start_offset'].values
+        self.current_lenghts = df['length'].values
 
         # 4. Alignement des colonnes
         # On s'assure que les colonnes du CSV correspondent exactement à self.classes
         # `reindex` ajoute des 0 si une classe est manquante dans ce fichier CSV
         df_labels = df.reindex(columns=self.classes, fill_value=0)
 
+        df_labels.fillna(0.0, inplace=True)
+
         labels_matrix = df_labels.astype(np.float32).values
         ids = df['exam_id'].astype(str).values
+
+        self.current_csv_idx = ids
 
         # 5. Mise en Cache : Création du dictionnaire ID -> Label
         self.current_labels_map = dict(zip(ids, labels_matrix))
 
         # Mise à jour de l'état
         self.current_file_idx = file_idx
-
-        # Debug
-        if self.file_handle['tracings'].shape[0] * self.file_handle['tracings'].shape[1] > 1_000_000:
-            print(f"Fichier : {self.h5_paths[file_idx]}")
-            print(f"Shape lue : {self.file_handle['tracings'].shape}")
-            raise ValueError("Signal aberrant")
 
 
     def __del__(self):
@@ -215,18 +241,18 @@ class LargeH5Dataset(Dataset):
 
 
 
-def ecg_collate_wrapper(batch, universel_padding=True, fixed_length=MAX_SIGNAL_LENGTH):
+def ecg_collate_wrapper(batch, use_static_padding=False, fixed_length=MAX_SIGNAL_LENGTH):
     """
     Transforme une liste d'échantillons de tailles variables en un Batch PyTorch.
 
     Cette fonction harmonise les dimensions temporelles des signaux pour qu'ils puissent être empilés dans un seul tenseur.
     
-    Elle propose deux stratégies via 'universel_padding' :
-    1. universel_padding=False (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
+    Elle propose deux stratégies via 'use_static_padding' :
+    1. use_static_padding=False (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
        Le batch est paddé à la longueur du signal le plus long de ce batch.
        Ex: Si le max du batch est 4500, tout le monde est paddé à 4500.
        
-    2. universel_padding=True (Universel) : Idéal pour les CNN classiques (avec couches Dense).
+    2. use_static_padding=True (Universel) : Idéal pour les CNN classiques (avec couches Dense).
        Le batch est forcé à une taille fixe 'fixed_length'.
        - Trop court ? Padding (zéros à la fin).
        - Trop long ? Cropping (on coupe la fin).
@@ -235,8 +261,8 @@ def ecg_collate_wrapper(batch, universel_padding=True, fixed_length=MAX_SIGNAL_L
         batch (list): Liste de tuples [(signal, label), ...] fournie par le Dataset.
                       - signal : Tensor de forme (Channels=12, Time=Variable)
                       - label  : Tensor de forme (NumClasses,) ou scalaire.
-        universel_padding (bool): Si True, utilise le padding dynamique (max du batch).
-                           Si False, force la taille 'fixed_length'.
+        use_static_padding (bool): Si True, utilise le padding universel.
+                           Si False pad dynamyquement.
         fixed_length (int): La taille cible temporelle (T) pour le mode universel.
 
     Returns:
@@ -244,12 +270,12 @@ def ecg_collate_wrapper(batch, universel_padding=True, fixed_length=MAX_SIGNAL_L
                - padded_signals : Tensor (Batch, 12, T_Finale)
                - stacked_labels : Tensor (Batch, NumClasses)
     """
+    signals, labels, length = zip(*batch)
     # Transpose (Channels, Time) -> (Time, Channels) car pad_sequence travaille sur la dimension 0 (Time)
-    signals = [item[0].T for item in batch]  
-    labels = [item[1] for item in batch]
+    signals = [s.T for s in signals]
 
     # Option 1 : Padding dynamique
-    if not universel_padding:
+    if not use_static_padding:
         # pad_sequence trouve automatiquement le max du batch et comble les trous
         # batch_first=True -> Sortie : (Batch, Max_Time_du_Batch, 12)
         padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)
@@ -285,4 +311,4 @@ def ecg_collate_wrapper(batch, universel_padding=True, fixed_length=MAX_SIGNAL_L
     # Empilage des labels
     stacked_labels = torch.stack(labels)
 
-    return padded_signals, stacked_labels
+    return padded_signals, stacked_labels, length
