@@ -4,15 +4,17 @@ import argparse
 import re
 import time
 import math
+from tqdm import tqdm
 
 import multiprocessing
 from functools import partial
 
+import wandb
+
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
-import wandb  # Librairie de monitoring
 
 from torch.utils.data import DataLoader
 from Dataset import LargeH5Dataset, ecg_collate_wrapper
@@ -22,109 +24,111 @@ import torch._dynamo
 from Cnn import CNN
 
 
-# Supprime la limite de recompilation
+
+# ==============================================================================
+# CONFIGURATION SYSTÈME
+# ==============================================================================
+# Liste des modèles disponibles youhou il y en a trop
+model_list = [CNN]
+
+# Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
 
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
     """
-    Exécute une époque d'entraînement complète (Forward + Backward pass).
+    Exécute une époque d'entraînement complète avec gestion des erreurs.
+
+    Si une Loss devient NaN ou Inf, le batch est consigné dans un fichier et 
+    dans un tableau WandB pour analyse, sans faire planter l'entraînement.
 
     Args:
-        model (nn.Module): Le réseau de neurones à entraîner.
-        dataloader (DataLoader): Le générateur de batchs d'entraînement.
-        optimizer (torch.optim): L'optimiseur (ex: AdamW).
-        criterion (nn.Module): La fonction de perte (ex: BCEWithLogitsLoss).
-        scaler (torch.amp.GradScaler): Scaler pour la précision mixte (FP16). Peut être None.
-        device (torch.device): 'cuda' ou 'cpu'.
-        epoch (int): Numéro de l'époque actuelle (pour l'affichage).
+        model (nn.Module): Le réseau de neurones.
+        dataloader (DataLoader): Le chargeur de données d'entraînement.
+        optimizer (torch.optim.Optimizer): L'optimiseur.
+        criterion (nn.Module): La fonction de coût.
+        scaler (torch.amp.GradScaler): Scaler pour la précision mixte (peut être None).
+        device (torch.device): Périphérique d'exécution (CPU/CUDA).
+        epoch (int): Numéro de l'époque actuelle.
         total_epochs (int): Nombre total d'époques.
-        use_amp (bool): Si True, active l'Automatic Mixed Precision (plus rapide).
+        use_amp (bool): Activation de l'Automatic Mixed Precision.
 
     Returns:
-        float: La perte moyenne (loss) sur cette époque.
+        float: La perte moyenne sur l'époque. Retourne float('inf') si tous les batchs échouent.
     """
-    model.train()  # Active le mode entraînement (active Dropout, BatchNorm, etc.)
+    model.train()
 
     loop = tqdm(dataloader, desc=f"Ep {epoch}/{total_epochs} [TRAIN]")
     total_loss = 0
     count = 0
 
     for batch in loop:
-        # Récupération des données et envoi sur GPU
         tracings, targets, _ = batch
         tracings = tracings.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        # Remise à zéro des gradients
         optimizer.zero_grad(set_to_none=True)
 
-        # Forward Pass avec AMP
+        # Forward Pass
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
             predictions = model(tracings)
             loss = criterion(predictions, targets)
 
         # Backward Pass
         if scaler:
-            # Si AMP activé : on scale la loss pour éviter les underflows en FP16
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            # Mode standard (FP32)
             loss.backward()
             optimizer.step()
 
-        # Calcul des stats
+        # Logging
         loss_val = loss.item()
 
-        # Vérification mathématique (True si c'est un vrai nombre, False si NaN ou Inf)
         if math.isfinite(loss_val):
             total_loss += loss_val
             count += 1
-            # Mise à jour de la barre de progression uniquement si tout va bien
             loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{total_loss/count:.4f}")
-
         else:
-            log_message = f"CRITICAL: Loss invalide ({loss_val}) - Epoch {epoch}/{total_epochs} - Batch index {count} \
-                and tracing = {targets}\n"
+            # Enregistrement des preuves pour debug
+            try:
+                crash_table = wandb.Table(
+                    columns=["Epoch", "Batch", "Loss", "Targets Sample"],
+                    data=[[epoch, count, loss_val, str(targets[0].tolist())]]
+                )
+                wandb.log({"errors/train_crash_report": crash_table})
+            except Exception:
+                pass
 
-            # On s'assure que le dossier existe
-            os.makedirs("output", exist_ok=True)
-
-            # On écrit dans le fichier en mode 'a' (append) pour ne pas écraser les erreurs précédentes
-            with open("output/train_log.txt", "a") as f:
-                f.write(log_message)
-
-    return total_loss / count if count > 0 else 0.0
+    # Retourne la moyenne ou l'infini si tout a échoué
+    return total_loss / count if count > 0 else float('inf')
 
 
-def validate(model, dataloader, criterion, device, use_amp):
+
+def validate(model, dataloader, criterion, device, use_amp, epoch):
     """
-    Évalue le modèle sur le jeu de validation.
-    
-    Note: Désactive le calcul des gradients pour économiser la mémoire.
+    Évalue le modèle sur le jeu de validation avec surveillance des valeurs aberrantes.
 
     Args:
         model (nn.Module): Le modèle à évaluer.
-        dataloader (DataLoader): Le générateur de batchs de validation.
-        criterion (nn.Module): La fonction de perte.
-        device (torch.device): 'cuda' ou 'cpu'.
-        use_amp (bool): Si True, utilise l'autocast.
+        dataloader (DataLoader): Le chargeur de données de validation.
+        criterion (nn.Module): La fonction de coût.
+        device (torch.device): Périphérique d'exécution.
+        use_amp (bool): Activation de l'Automatic Mixed Precision.
+        epoch (int): Numéro de l'époque (pour les logs).
 
     Returns:
-        float: La perte moyenne (loss) sur le jeu de validation.
+        float: La perte moyenne. Retourne float('inf') en cas d'erreur critique globale.
     """
-    model.eval()  # Active le mode évaluation (fige Dropout, BatchNorm)
-
-    loop = tqdm(dataloader, desc="[VAL]")
+    model.eval()
+    loop = tqdm(dataloader, desc=f"Ep {epoch} [VAL]")
     total_loss = 0
     count = 0
 
-    # torch.no_grad() empêche PyTorch de stocker les calculs pour la backprop
     with torch.no_grad():
         for batch in loop:
-            tracings, targets = batch
+            tracings, targets, _ = batch
             tracings = tracings.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
 
@@ -132,217 +136,259 @@ def validate(model, dataloader, criterion, device, use_amp):
                 predictions = model(tracings)
                 loss = criterion(predictions, targets)
 
-            total_loss += loss.item()
-            count += 1
-            loop.set_postfix(val_loss=f"{total_loss/count:.4f}")
+            loss_val = loss.item()
+            
+            # Vérification Mathématique
+            if math.isfinite(loss_val):
+                total_loss += loss_val
+                count += 1
+                loop.set_postfix(val_loss=f"{total_loss/count:.4f}")
+            else:
+                try:
+                    crash_table = wandb.Table(
+                        columns=["Epoch", "Loss", "Targets Sample"],
+                        data=[[epoch, loss_val, str(targets[0].tolist())]]
+                    )
+                    wandb.log({"errors/val_crash_report": crash_table})
+                except Exception:
+                    pass
 
-    return total_loss / count if count > 0 else 0.0
+    # Si count > 0, on retourne la moyenne. Sinon, on retourne l'INFINI
+    return total_loss / count if count > 0 else float('inf')
+
 
 
 def run(args):
     """
-    Fonction principale qui orchestre tout le processus d'entraînement.
+    Orchestre le processus d'entraînement complet.
     
-    Étapes :
-    1. Init WandB.
-    2. Chargement des données (Train/Val).
-    3. Création du modèle et de l'optimiseur.
-    4. Boucle d'entraînement (Train -> Val -> Log -> Save).
+    Fonctionnalités incluses :
+    - Initialisation WandB (Mode Offline forcé).
+    - Chargement optimisé des données.
+    - Compilation du modèle (Torch 2.0).
+    - Boucle Train/Val avec Early Stopping.
+    - Sauvegarde d'Artifacts et métriques en temps réel.
     """
-    # On désactive toute tentative de connexion réseau
-    os.environ["WANDB_MODE"] = "offline"
+    # 1. Configuration des dossiers
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    os.makedirs(args.output, exist_ok=True)
 
-    # On s'assure que les dossiers de logs pointent vers le disque temporaire
+    # Configuration WandB pour environnement restreint (Offline)
+    os.environ["WANDB_MODE"] = "offline" 
     os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
-
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
+    exp_name = f"EXP_{model_list[args.model].__name__}_bs{args.batch_size}_lr{args.lr}_{pad_status}_{args.patience}"
 
-    exp_name = f"EXP_{ model_list[args.model].__name__}_bs{args.batch_size}_lr{args.lr} \
-            _ep{args.epochs}_{pad_status}_{args.patience}"
+    # 2. Gestion de l'ID WandB (Pour la reprise/resume)
+    wandb_id = wandb.util.generate_id()
+    resume_mode = "allow"
+    id_file_path = os.path.join(args.checkpoint_dir, "wandb_run_id.txt")
 
-    # Construction du nom d'expérience
+    if args.resume_from and os.path.exists(id_file_path):
+        with open(id_file_path, "r") as f:
+            old_id = f.read().strip()
+            if old_id:
+                wandb_id = old_id
+                resume_mode = "must"
+                print(f"[WANDB] Reprise du run ID : {wandb_id}")
+
+    # 3. Initialisation WandB
     wandb.init(
         project="ECG_Classification_Experiments",
         config=args,
-        name=exp_name
+        name=exp_name,
+        id=wandb_id,
+        resume=resume_mode,
+        tags=["scientific", pad_status, "CNN", "offline"]
     )
 
-    print(f"Début de {exp_name}")
+    # Sauvegarde de l'ID pour une future reprise
+    with open(id_file_path, "w") as f:
+        f.write(wandb.run.id)
 
-    # Préparation des données
-    print(f"[INIT] Chargement des classes depuis : {args.class_map}")
-    with open(args.class_map, 'r') as f:
-        loaded_classes = json.load(f)
+    # Définition des axes pour des graphiques cohérents
+    wandb.define_metric("val/loss", step_metric="epoch")
+    wandb.define_metric("train/loss", step_metric="epoch")
+    wandb.define_metric("perf/*", step_metric="epoch")
+
+    print(f"Début de l'expérience : {exp_name}")
+
+    # 4. Chargement des Données
+    print(f"[INIT] Chargement des classes...")
+    with open(args.class_map, 'r') as f: loaded_classes = json.load(f)
     num_classes = len(loaded_classes)
 
-    print(f"[DATA] Train: {args.train_data}")
-    print(f"[DATA] Val:   {args.val_data}")
+    # Création des Datasets
+    train_ds = LargeH5Dataset(input_dir=args.train_data, classes_list=loaded_classes, use_static_padding=args.use_static_padding)
+    val_ds = LargeH5Dataset(input_dir=args.val_data, classes_list=loaded_classes, use_static_padding=args.use_static_padding)
 
-    # Dataset
-    train_ds = LargeH5Dataset(
-        input_dir=args.train_data,
-        classes_list=loaded_classes,
-        use_static_padding=args.use_static_padding
-    )
+    collate_fn = partial(ecg_collate_wrapper, use_static_padding=args.use_static_padding)
 
-    val_ds = LargeH5Dataset(
-        input_dir=args.val_data,
-        classes_list=loaded_classes,
-        use_static_padding=args.use_static_padding
-    )
-
-    # Sampler
+    # Création des Samplers et Loaders
     train_sampler = MegaBatchSortishSampler(train_ds, batch_size=args.batch_size, shuffle=True)
     val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    collate_fn = partial(ecg_collate_wrapper, 
-                     use_static_padding=args.use_static_padding)
-
-    # Dataloader de Training
     train_loader = DataLoader(
-        dataset=train_ds,
-        collate_fn=collate_fn,
-        batch_sampler=train_sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2 
+        train_ds, collate_fn=collate_fn, batch_sampler=train_sampler, 
+        num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
     )
-
-    # Dataloader de Validation
     val_loader = DataLoader(
-        dataset=val_ds,
-        collate_fn=collate_fn,
-        batch_sampler=val_sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2
+        val_ds, collate_fn=collate_fn, batch_sampler=val_sampler, 
+        num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
     )
 
-    # Setup Matériel & Modèle
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-
+    # 5. Configuration Matérielle
     if torch.cuda.is_available():
         device = torch.device("cuda")
         use_amp = True
-        torch.backends.cudnn.benchmark = True # Optimise les algos de convolution via triton
-        print("[INIT] Mode: CUDA (NVIDIA)")
+        torch.backends.cudnn.benchmark = args.use_static_padding
+        print("[INIT] Mode: CUDA")
     else:
         device = torch.device("cpu")
         use_amp = False
-        print("[INIT] Mode: CPU (Lent)")
+        print("[INIT] Mode: CPU")
 
-    print(f"[MODEL] Création du modèle {model_list[args.model].__name__} pour {num_classes} classes...")
+    # 6. Création du Modèle
     model = model_list[args.model](num_classes=num_classes).to(device)
 
+    # Log les gradients et poids tous les 500 batchs pour diagnostic mais casse torch.compile !!!!
+    # wandb.watch(model, log="all", log_freq=500)
+
+    # Compilation PyTorch 2.0
     try:
         model = torch.compile(model, dynamic=True)
     except Exception as e:
-        print(f"[INFO] torch.compile ignoré : {e}")
+        print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
     scaler_amp = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # Gestion de la Reprise
+    # 7. Logique de Reprise
     start_epoch = 1
     best_val_loss = float('inf')
 
+    # Si reprise WandB, on tente de récupérer le meilleur score connu
+    if wandb.run.summary.get("best_val_loss"):
+        saved_best = wandb.run.summary["best_val_loss"]
+        if isinstance(saved_best, (int, float)) and math.isfinite(saved_best):
+            best_val_loss = saved_best
+            print(f"[RESUME] Best score précédent récupéré de WandB: {best_val_loss}")
+
     if args.resume_from and os.path.exists(args.resume_from):
-        print(f"[RESUME] Chargement du checkpoint : {args.resume_from}")
+        print(f"[RESUME] Chargement des poids depuis : {args.resume_from}")
         checkpoint = torch.load(args.resume_from, map_location=device)
-        # Gestion des clés si le modèle a été compilé (préfixe '_orig_mod.')
+        # Nettoyage des clés '_orig_mod' si modèle compilé
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
         model.load_state_dict(state_dict, strict=False)
 
-        # Tentative de récupérer l'époque depuis le nom du fichier
+        # Récupération de l'époque
         match = re.search(r'ep(\d+)', args.resume_from)
         if match:
             start_epoch = int(match.group(1)) + 1
-            print(f"[RESUME] Reprise à l'époque {start_epoch}")
 
-    # Boucle d'Entraînement
-    print(f"\n[TRAIN] Début de l'entraînement pour {args.epochs} époques.")
+
+    # 8.Boucle des epochs 
+    print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs}")
     stagnation_counter = 0
-
-    train_start_time = time.time()
+    total_start_time = time.time()
 
     for epoch in range(start_epoch, args.epochs + 1):
-        # A. Entraînement
+        epoch_start = time.time()
+
+        # A. Train
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, 
             scaler_amp, device, epoch, args.epochs, use_amp
         )
 
+        # Calcul temps & débit
+        epoch_duration = time.time() - epoch_start
+        samples_per_sec = len(train_ds) / epoch_duration if epoch_duration > 0 else 0
+
+        # Métriques brutes
         metrics = {
             "epoch": epoch,
             "train/loss": train_loss,
+            "train/lr": optimizer.param_groups[0]['lr'], 
+            "perf/epoch_duration": epoch_duration,
+            "perf/samples_per_sec": samples_per_sec
         }
 
-        val_loss = None
-        # Validation dès 15 epoch. Inutile avant
-        if epoch > 15:
-            # B. Validation
-            val_loss = validate(model, val_loader, criterion, device, use_amp)
+        # B. Validation
+        if epoch >= 15:
+            val_loss = validate(model, val_loader, criterion, device, use_amp, epoch)
+            metrics["val/loss"] = val_loss
 
-            # C. Sauvegarde du Meilleur Modèle
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                stagnation_counter = 0
+            # C. Si la val a fonctionnée
+            if math.isfinite(val_loss):
+                # C.1 Nouveau Record
+                if val_loss < best_val_loss:
+                    previous = best_val_loss
+                    best_val_loss = val_loss
+                    stagnation_counter = 0
 
-                # Nom du fichier
-                save_path = os.path.join(args.checkpoint_dir, "best_model.pt")
+                    # Sauvegarde disque du model
+                    save_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}.pt")
+                    torch.save(model.state_dict(), save_path)
 
-                # Sauvegarde locale
-                torch.save(model.state_dict(), save_path)
-                print(f"    *** NEW RECORD *** Modèle sauvegardé : {save_path}")
+                    # Mise à jour du résumé WandB
+                    wandb.run.summary["best_val_loss"] = best_val_loss
+                    wandb.run.summary["best_epoch"] = epoch
+
+                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_loss:.4f} (Saved)")
+                
+                # C.2 Pas d'amélioration
+                else:
+                    stagnation_counter += 1
+                    print(f"    [PATIENCE] {stagnation_counter}/{args.patience} (Best: {best_val_loss:.4f})")
+
+                    # Early Stopping
+                    if stagnation_counter >= args.patience:
+                        print(f"\n[STOP] Early Stopping déclenché (Patience {args.patience} atteinte).")
+                        wandb.log(metrics) # Log final avant de quitter
+                        break
+
             else:
-                stagnation_counter += 1
-                print(f"    [PATIENCE] Pas d'amélioration ({stagnation_counter}/{args.patience})")
+                print(f"    [WARNING] Val Loss invalide ({val_loss}). Ignoré.")
 
-                # D. Early Stopping
-                if stagnation_counter >= args.patience:
-                    print(f"\n[STOP] Arrêt précoce déclenché (Patience {args.patience} atteinte).")
-                    print(f"       Meilleur score : {best_val_loss:.4f}")
-                    break
-
-        # E. Backup périodique
+        # D. Backup Périodique
         if epoch % 5 == 0:
             torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"backup_ep{epoch}.pt"))
 
-        if val_loss:
-            metrics["val/loss"] =  val_loss
-
-        # F. Envoi des stats à WandB
+        # E. Envoi des métriques à WandB
         wandb.log(metrics)
 
+    # 9. Fin du script
+    total_duration_hours = (time.time() - total_start_time) / 3600
+    wandb.run.summary["total_train_time_hours"] = total_duration_hours
 
-    # Enregistre le temps total et les meilleurs résultats dans le résumé du run
-    wandb.run.summary["total_train_time_hours"] = (time.time() - train_start_time) / 3600
-    wandb.run.summary["best_val_loss"] = best_val_loss
+    # Versionning du modèle final
+    print("[WANDB] Upload du modèle final en cours...")
+    artifact = wandb.Artifact(f"model-{wandb.run.id}", type='model')
 
-    # Fin du script
+    best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}.pt")
+    if os.path.exists(best_model_path):
+        artifact.add_file(best_model_path)
+        wandb.log_artifact(artifact)
+    else:
+        print("[WARN] Pas de fichier 'best_model.pt' trouvé pour l'upload.")
+
     wandb.finish()
-    print("[FIN] Script terminé avec succès.")
+    print(f"[FIN] Terminé en {total_duration_hours:.2f} heures. Best Loss: {best_val_loss}")
 
-
-
-model_list = [CNN]
 
 
 def main():
     """
-    Point d'entrée du script. Parse les arguments CLI.
+    Point d'entrée du script. Gestion des arguments CLI.
     """
     options = ", ".join([f"{i}: {model}" for i, model in enumerate(model_list)])
+    parser = argparse.ArgumentParser(description="Script d'entraînement ECG Scientifique")
 
-
-    parser = argparse.ArgumentParser(description="Script d'entraînement ECG avec WandB")
-
-    # Arguments du script
+    # Arguments Dossiers & Fichiers
     parser.add_argument('--train_data', type=str, default="../output/final_data/train", 
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../output/final_data/val", 
@@ -352,22 +398,17 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help="Dossier où sauvegarder les poids (.pt)")
     parser.add_argument('--output', type=str, default='../output/',
-                        help="Dossier de sortie standart")
+                        help="Dossier de sortie standard")
     parser.add_argument('--model', type=int, default=0,
                         help=f"Quel modèle voulez-vous entrainer: {options}")
 
-    # Arguments du modèle (Hyperparamètres)
+    # Hyperparamètres
     parser.add_argument('--batch_size', type=int, default=64, help="Taille du batch")
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
-    parser.add_argument('--patience', type=int, default=6, help="Nb époques sans amélioration avant arrêt")
-    parser.add_argument(
-        '--use_static_padding', 
-        action='store_true', 
-        default=False,
-        help="Si activé, force une taille de padding fixe (universelle) pour tous les batchs. "
-            "Par défaut, le padding est dynamique (ajusté à la longueur max du lot actuel)."
-    )
+    parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
+    parser.add_argument('--use_static_padding', action='store_true', default=False,
+                        help="Force une taille de padding fixe (universelle).")
 
     # Arguments Système
     parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count(),
@@ -377,11 +418,9 @@ def main():
 
     args = parser.parse_args()
 
-
-    # Config PyTorch pour éviter la fragmentation CUDA
+    # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Lancement
     run(args)
 
 
