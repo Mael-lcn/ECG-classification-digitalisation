@@ -5,28 +5,40 @@ import numpy as np
 
 class MegaBatchSortishSampler(Sampler):
     """
-    Sampler personnalisé pour optimiser le padding des séquences de longueurs variables.
+    Sampler personnalisé optimisant le padding dynamique pour des datasets fragmentés (HDF5).
 
-    Stratégie "Global Shuffle, Local Sort":
-    1. Mélange globalement tous les indices du dataset (Random).
-    2. Prélève un 'Mega-Batch' (ex: 50 * batch_size).
-    3. Trie ce Mega-Batch par longueur de séquence.
-    4. Découpe ce Mega-Batch trié en mini-batches finaux.
+    Ce sampler implémente une stratégie de "Smart Batching" conçue pour
+    minimiser le padding inutile dans les batchs, tout en respectant la contiguïté des fichiers 
+    pour optimiser les I/O.
+
+    Le processus se déroule en trois étapes hiérarchiques :
+    1. Ordre des fichiers : Les fichiers sources sont traités un par un (ordre aléatoire si shuffle=True).
+    2. Mega-Batch : Au sein d'un fichier, on prélève un grand pool d'indices (Mega-Batch).
+    3. Tri Local : Ce pool est trié par longueur de séquence décroissante, puis découpé en
+    mini-batchs homogènes.
+
+    Cette approche réduit considérablement la consommation mémoire (VRAM) lors de l'utilisation 
+    de `pad_sequence`, car les séquences courtes ne sont pas mélangées avec les très longues.
+
+    Args:
+        dataset (Dataset): Instance du dataset (doit exposer `cumulative_sizes` et `all_lengths`).
+        batch_size (int): Taille cible du mini-batch final pour le GPU.
+        mega_batch_factor (int, optional): Facteur déterminant la taille du buffer de tri.
+            Taille du buffer = batch_size * mega_batch_factor.
+            Un facteur élevé améliore l'efficacité du padding mais réduit la diversité 
+            aléatoire locale du batch. Défaut: 20.
+        shuffle (bool, optional): Si True, mélange l'ordre des fichiers et les indices au sein 
+            de chaque fichier avant le tri. Défaut: True.
     """
     def __init__(self, dataset, batch_size, mega_batch_factor=20, shuffle=True):
         """
-        La carte des longueurs (lengths) : Il doit savoir que l'indice 50 dure 3000 points et l'indice 51 dure 4500 points.
-        C'est pour cela qu'on lui passe le Dataset.
-
-        Les paramètres de structure :
-        batch_size (64) : Pour savoir comment découper les groupes.
-        mega_batch_factor (50) : Pour savoir quelle taille de l'ensemble d'indices il doit mélanger avant de trier.
+        Initialise le sampler et pré-calcule les bornes des fichiers.
 
         Args:
-            dataset (Dataset): Ton dataset (doit avoir un moyen d'accéder à la longueur) plutot bas en train et long en eval.
-            batch_size (int): La taille finale du batch pour le GPU.
-            mega_batch_factor (int): Combien de batches on pré-charge pour le tri (défaut 50).
-            shuffle (bool): True pour l'entrainement (mélange global), False pour la val.
+            dataset (Dataset): Le dataset source contenant les métadonnées de longueur.
+            batch_size (int): La taille des batchs finaux renvoyés par le DataLoader.
+            mega_batch_factor (int): Multiplicateur définissant la granularité du tri.
+            shuffle (bool): Active le mélange aléatoire (Shuffle global des fichiers + Shuffle local des indices).
         """
         # Initialisation des variables
         self.dataset = dataset
@@ -42,17 +54,21 @@ class MegaBatchSortishSampler(Sampler):
 
     def __iter__(self):
         """
-        Générateur principal appelé par le DataLoader à chaque époque.
-        
-        Logique à implémenter :
-        1. Créer une liste d'indices de 0 à N.
-        2. Si shuffle=True, mélanger cette liste aléatoirement.
-        3. Boucler sur cette liste par pas de (batch_size * mega_batch_factor).
-        4. Pour chaque 'Mega-Chunk' :
-           a. Récupérer les longueurs de chaque indice via le dataset.
-           b. Trier les indices du Mega-Chunk par longueur (descendant).
-           c. Découper ce Mega-Chunk trié en petits morceaux de 'batch_size'.
-           d. YIELD (renvoyer) chaque petit morceau (liste d'indices).
+        Générateur principal itérant sur les indices du dataset.
+
+        Ce générateur ne renvoie pas un indice unique, mais une liste d'indices constituant un batch complet.
+
+        Logique d'itération :
+        1. Pour chaque fichier :
+            a. Récupère tous les indices locaux.
+            b. Mélange ces indices (si shuffle=True).
+            c. Crée des "Mega-Chunks".
+            d. Trie chaque chunk par longueur de séquence (descendant).
+            e. Découpe le chunk trié en mini-batchs de taille `batch_size`.
+            f. Yield le mini-batch.
+
+        Yields:
+            list[int]: Une liste d'indices d'échantillons correspondant à un mini-batch.
         """
         num_files = len(self.dataset.h5_paths)
         file_order = np.arange(num_files)

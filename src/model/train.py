@@ -28,7 +28,7 @@ from Cnn import CNN
 # ==============================================================================
 # CONFIGURATION SYSTÈME
 # ==============================================================================
-# Liste des modèles disponibles youhou il y en a trop
+# Liste des modèles disponibles youhou il y en a trop...
 model_list = [CNN]
 
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
@@ -37,24 +37,28 @@ torch._dynamo.config.recompile_limit = 6000
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
     """
-    Exécute une époque d'entraînement complète avec gestion des erreurs.
+    Exécute une époque d'entraînement complète avec tolérance aux pannes numériques.
 
-    Si une Loss devient NaN ou Inf, le batch est consigné dans un fichier et 
-    dans un tableau WandB pour analyse, sans faire planter l'entraînement.
+    Cette fonction itère sur le DataLoader, effectue les passes avant/arrière et met à jour les poids.
+    Elle intègre une gestion robuste des erreurs : si une perte (Loss) devient NaN ou Inf, 
+    le batch incriminé est ignoré et consigné dans un rapport d'erreur WandB, évitant ainsi 
+    le crash complet de l'entraînement.
 
     Args:
-        model (nn.Module): Le réseau de neurones.
-        dataloader (DataLoader): Le chargeur de données d'entraînement.
-        optimizer (torch.optim.Optimizer): L'optimiseur.
-        criterion (nn.Module): La fonction de coût.
-        scaler (torch.amp.GradScaler): Scaler pour la précision mixte (peut être None).
-        device (torch.device): Périphérique d'exécution (CPU/CUDA).
-        epoch (int): Numéro de l'époque actuelle.
-        total_epochs (int): Nombre total d'époques.
-        use_amp (bool): Activation de l'Automatic Mixed Precision.
+        model (nn.Module): Le réseau de neurones à entraîner.
+        dataloader (DataLoader): Le chargeur de données (doit renvoyer tracings, targets, lengths).
+        optimizer (torch.optim.Optimizer): L'optimiseur (ex: AdamW).
+        criterion (nn.Module): La fonction de perte (ex: BCEWithLogitsLoss).
+        scaler (torch.amp.GradScaler | None): Scaler pour la gestion de la précision mixte (AMP).
+            Si None, l'entraînement se fait en précision standard (FP32).
+        device (torch.device): Le périphérique de calcul (CPU ou CUDA).
+        epoch (int): L'index de l'époque courante (pour l'affichage/logging).
+        total_epochs (int): Nombre total d'époques prévues.
+        use_amp (bool): Indique si l'Automatic Mixed Precision est activée.
 
     Returns:
-        float: La perte moyenne sur l'époque. Retourne float('inf') si tous les batchs échouent.
+        float: La perte moyenne de l'époque. Retourne `float('inf')` si tous les batchs 
+        de l'époque ont échoué (cas critique).
     """
     model.train()
 
@@ -108,18 +112,22 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 
 def validate(model, dataloader, criterion, device, use_amp, epoch):
     """
-    Évalue le modèle sur le jeu de validation avec surveillance des valeurs aberrantes.
+    Évalue le modèle sur le jeu de validation en mode inférence.
+
+    Cette fonction calcule la perte moyenne sur le dataset de validation sans calculer les gradients.
+    Elle utilise également le contexte AMP pour accélérer l'inférence et surveille l'apparition
+    de valeurs aberrantes (NaN/Inf) pour générer des rapports de diagnostic sans interrompre le processus.
 
     Args:
-        model (nn.Module): Le modèle à évaluer.
+        model (nn.Module): Le modèle à évaluer (sera passé en mode .eval()).
         dataloader (DataLoader): Le chargeur de données de validation.
-        criterion (nn.Module): La fonction de coût.
-        device (torch.device): Périphérique d'exécution.
-        use_amp (bool): Activation de l'Automatic Mixed Precision.
-        epoch (int): Numéro de l'époque (pour les logs).
+        criterion (nn.Module): La fonction de perte pour calculer le score.
+        device (torch.device): Le périphérique de calcul.
+        use_amp (bool): Indique si l'inférence doit utiliser la précision mixte.
+        epoch (int): Numéro de l'époque actuelle (utilisé pour taguer les logs d'erreurs).
 
     Returns:
-        float: La perte moyenne. Retourne float('inf') en cas d'erreur critique globale.
+        float: La perte moyenne de validation. Retourne `float('inf')` si le calcul échoue globalement.
     """
     model.eval()
     loop = tqdm(dataloader, desc=f"Ep {epoch} [VAL]")
@@ -137,7 +145,7 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
                 loss = criterion(predictions, targets)
 
             loss_val = loss.item()
-            
+
             # Vérification Mathématique
             if math.isfinite(loss_val):
                 total_loss += loss_val
@@ -160,16 +168,39 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
 
 def run(args):
     """
-    Orchestre le processus d'entraînement complet.
-    
-    Fonctionnalités incluses :
-    - Initialisation WandB (Mode Offline forcé).
-    - Chargement optimisé des données.
-    - Compilation du modèle (Torch 2.0).
-    - Boucle Train/Val avec Early Stopping.
-    - Sauvegarde d'Artifacts et métriques en temps réel.
+    Orchestre le cycle de vie complet de l'expérience d'entraînement (Pipeline principal).
+
+    Cette fonction configure l'environnement, initialise les composants et gère la boucle d'entraînement.
+    Les étapes clés incluent :
+
+    1. Setup Système : Création des dossiers, configuration de WandB (mode Offline/Online) et 
+    gestion de la reprise (Resume) via ID de run.
+    2. Data Loading : Instanciation du `LargeH5Dataset` et du `MegaBatchSortishSampler` 
+    pour optimiser le débit I/O.
+    3. Optimisation : Compilation du modèle via `torch.compile` (PyTorch 2.0+) et configuration
+    de l'optimiseur AdamW.
+    4. Boucle Train/Val : Exécution séquentielle avec calcul de métriques en temps réel.
+    5. Sauvegarde : Checkpoints périodiques, sauvegarde du "Best Model" sur amélioration de la 
+    validation, et mécanisme d'Early Stopping.
+
+    Args:
+        args (argparse.Namespace): Objet contenant tous les hyperparamètres et configurations 
+        (batch_size, lr, paths, etc.) parsés depuis la ligne de commande.
     """
-    # 1. Configuration des dossiers
+
+    # 1. Configuration Matérielle
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        use_amp = args.use_amp and True
+        torch.backends.cudnn.benchmark = args.use_static_padding
+        print("[INIT] Mode: CUDA")
+    else:
+        device = torch.device("cpu")
+        use_amp = False
+        print("[INIT] Mode: CPU")
+
+
+    # 2. Configuration des dossiers
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     os.makedirs(args.output, exist_ok=True)
 
@@ -179,9 +210,9 @@ def run(args):
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    exp_name = f"EXP_{model_list[args.model].__name__}_bs{args.batch_size}_lr{args.lr}_{pad_status}_{args.patience}"
+    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_{args.patience}"
 
-    # 2. Gestion de l'ID WandB (Pour la reprise/resume)
+    # 3. Gestion de l'ID WandB (Pour la reprise/resume)
     wandb_id = wandb.util.generate_id()
     resume_mode = "allow"
     id_file_path = os.path.join(args.checkpoint_dir, "wandb_run_id.txt")
@@ -194,7 +225,7 @@ def run(args):
                 resume_mode = "must"
                 print(f"[WANDB] Reprise du run ID : {wandb_id}")
 
-    # 3. Initialisation WandB
+    # 4. Initialisation WandB
     wandb.init(
         project="ECG_Classification_Experiments",
         config=args,
@@ -215,7 +246,7 @@ def run(args):
 
     print(f"Début de l'expérience : {exp_name}")
 
-    # 4. Chargement des Données
+    # 5. Chargement des Données
     print(f"[INIT] Chargement des classes...")
     with open(args.class_map, 'r') as f: loaded_classes = json.load(f)
     num_classes = len(loaded_classes)
@@ -238,17 +269,6 @@ def run(args):
         val_ds, collate_fn=collate_fn, batch_sampler=val_sampler, 
         num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
     )
-
-    # 5. Configuration Matérielle
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        use_amp = True
-        torch.backends.cudnn.benchmark = args.use_static_padding
-        print("[INIT] Mode: CUDA")
-    else:
-        device = torch.device("cpu")
-        use_amp = False
-        print("[INIT] Mode: CPU")
 
     # 6. Création du Modèle
     model = model_list[args.model](num_classes=num_classes).to(device)
@@ -290,7 +310,7 @@ def run(args):
             start_epoch = int(match.group(1)) + 1
 
 
-    # 8.Boucle des epochs 
+    # 8.Boucle des epochs
     print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs}")
     stagnation_counter = 0
     total_start_time = time.time()
@@ -409,6 +429,8 @@ def main():
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
     parser.add_argument('--use_static_padding', action='store_true', default=False,
                         help="Force une taille de padding fixe (universelle).")
+    parser.add_argument('--use_amp', action='store_true', default=False,
+                        help="Active l'Automatic Mixed Precision (AMP). Si omis, l'entraînement est en FP32 (plus stable).")
 
     # Arguments Système
     parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count(),
