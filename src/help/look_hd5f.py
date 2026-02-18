@@ -1,154 +1,171 @@
-import h5py
-import numpy as np
 import os
 import argparse
 import sys
+import numpy as np
 from tqdm import tqdm
+import h5py
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 
-def analyze_dataset_statistics(dset, chunk_size=1024):
+def get_dataset_stats(data):
     """
-    Parcourt un dataset HDF5 par morceaux pour calculer ses statistiques globales
-    sans charger tout le fichier en mémoire.
-
+    Calcule les statistiques sur un tableau NumPy chargé en mémoire.
+    Inclut la détection d'Underflow (valeurs trop petites pour FP16).
+    
     Args:
-        dset (h5py.Dataset): L'objet dataset HDF5 à analyser.
-        chunk_size (int): Nombre d'échantillons à charger par itération.
+        data (np.ndarray): Le tableau de données complet.
 
     Returns:
-        dict: Dictionnaire contenant {has_nan, has_inf, min_val, max_val, total_zeros}.
+        Dict[str, Any]: Dictionnaire contenant les métriques d'intégrité.
     """
-    # Initialisation des statistiques
     stats = {
         "has_nan": False,
         "has_inf": False,
+        "has_underflow": False,
         "min_val": float('inf'),
         "max_val": float('-inf'),
-        "total_zeros": 0
+        "total_zeros": 0,
+        "size": data.size
     }
 
-    total_samples = dset.shape[0]
+    if data.size == 0:
+        return stats
 
-    # On utilise tqdm pour voir l'avancement car le scan peut être long
-    # desc=f"   Scan {dset.name}" permet de voir quel dataset est traité
-    pbar = tqdm(total=total_samples, desc=f"   Analyse {dset.name.split('/')[-1]}", unit="samples", leave=False)
+    # 1. Détection vectorisée (NaN / Inf)
+    if np.isnan(data).any():
+        stats["has_nan"] = True
 
-    for i in range(0, total_samples, chunk_size):
-        # Lecture optimisée : on ne charge que le morceau nécessaire en RAM
-        chunk = dset[i : i + chunk_size]
+    if np.isinf(data).any():
+        stats["has_inf"] = True
 
-        # Conversion en float pour les calculs stats si nécessaire, 
-        # mais on garde le type original pour la détection NaN si possible.
-        # Note: Si c'est des entiers, pas de NaN possible, mais on gère le cas général.
-        if not np.issubdtype(chunk.dtype, np.number):
-            pbar.update(chunk.shape[0])
-            continue
+    # 2. Détection Underflow (Risque FP16)
+    # On cherche des valeurs non-nulles mais inférieures au seuil de précision du float16 (~6e-5)
+    if np.any((np.abs(data) > 0) & (np.abs(data) < 6.1e-5)):
+        stats["has_underflow"] = True
 
-        # 1. Détection NaN / Inf
-        if np.isnan(chunk).any():
-            stats["has_nan"] = True
-        
-        if np.isinf(chunk).any():
-            stats["has_inf"] = True
+    # 3. Calcul des bornes
+    try:
+        stats["min_val"] = float(np.nanmin(data))
+        stats["max_val"] = float(np.nanmax(data))
+    except ValueError:
+        # Cas rare : dataset rempli uniquement de NaN
+        pass
 
-        # 2. Calcul Min / Max Local
-        # On utilise nanmin/nanmax pour ne pas propager les NaN dans le calcul du min/max
-        # si jamais il y en a (bien qu'on les flag juste avant)
-        try:
-            current_min = np.nanmin(chunk)
-            current_max = np.nanmax(chunk)
+    # 4. Comptage des zéros
+    stats["total_zeros"] = np.count_nonzero(data == 0)
 
-            if current_min < stats["min_val"]:
-                stats["min_val"] = current_min
-
-            if current_max > stats["max_val"]:
-                stats["max_val"] = current_max
-        except ValueError:
-             # Cas où le chunk serait vide ou rempli de NaN uniquement
-             pass
-
-        # 3. Compte les zéros exacts (pour détecter des signaux vides/morts)
-        stats["total_zeros"] += np.count_nonzero(chunk == 0)
-
-        pbar.update(chunk.shape[0])
-
-    pbar.close()
     return stats
 
 
-def inspect_h5_thorough(file_path):
+def process_single_file(file_path):
     """
-    Ouvre un fichier HDF5 et lance une inspection approfondie de tous les datasets numériques.
-
-    Args:
-        file_path (str): Chemin vers le fichier .hdf5.
+    Worker Function : Charge uniquement la clé 'tracing'.
     """
-    if not os.path.exists(file_path):
-        print(f"[ERREUR] Fichier introuvable : {file_path}")
-        return
+    file_name = file_path.name
+    report_lines = []
 
-    file_size = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"\n{'='*80}")
-    print(f"RAPPORT D'INSPECTION : {os.path.basename(file_path)}")
-    print(f"Taille sur disque : {file_size:.2f} MB")
-    print(f"{'='*80}")
+    # En-tête
+    header = f"\n{'='*60}\nFICHIER : {file_name}\n{'='*60}"
+    report_lines.append(header)
 
     try:
         with h5py.File(file_path, 'r') as f:
+
+            # Récupération du dataset
+            dset = f['tracing']
+
+            # Vérification type
+            if not np.issubdtype(dset.dtype, np.number):
+                return f"{header}\n[SKIP] Le dataset 'tracing' n'est pas numérique.\n"
+
+            # Charge tout le tenseur (B, C, T) en RAM
+            data = dset[:]
+
+            # Analyse
+            s = get_dataset_stats(data)
+
+            # Construction du rapport
+            dset_report = [f"\n   [TARGET] 'tracing' | Shape: {dset.shape} | Type: {dset.dtype}"]
+
+            # --- ALERTES ---
+            if s["has_nan"]:
+                dset_report.append("      >>> ALERTE : Contient des NaN (Corrompu)")
+
+            if s["has_inf"]:
+                dset_report.append("      >>> ALERTE : Contient des valeurs Infinies (Inf)")
             
-            def visit_node(name, obj):
-                if isinstance(obj, h5py.Dataset):
-                    print(f"\n[DATASET] {name}")
-                    print(f"   Shape : {obj.shape}")
-                    print(f"   Type  : {obj.dtype}")
+            if s["has_underflow"]:
+                dset_report.append("      >>> WARNING : Underflow détecté (valeurs positives < 6.1e-5)")
 
-                    # On analyse uniquement les datasets contenant des nombres (float/int)
-                    # On exclut les chaînes de caractères (ex: exam_id)
-                    if np.issubdtype(obj.dtype, np.number):
-                        
-                        # Lancement de l'analyse chunk par chunk
-                        s = analyze_dataset_statistics(obj)
+            # --- STATS ---
+            if s["min_val"] != float('inf'):
+                dset_report.append(f"      -> Min: {s['min_val']:.6f} | Max: {s['max_val']:.6f}")
 
-                        # --- RAPPORT D'ANALYSE ---
-                        if s["has_nan"]:
-                            print(f"   🛑 CRITIQUE : Contient des NaN ! (Corrompu)")
-                        else:
-                            print(f"   ✅ Intégrité : Pas de NaN détecté.")
+                # Check Overflow Float16
+                if abs(s['max_val']) > 65500 or abs(s['min_val']) > 65500:
+                    dset_report.append("      -> WARNING : Valeurs > 65500 (Risque Overflow Float16)")
 
-                        if s["has_inf"]:
-                            print(f"   🛑 CRITIQUE : Contient des valeurs Infinies (Inf) !")
-                        else:
-                            print(f"   ✅ Intégrité : Pas de valeurs Infinies.")
+            else:
+                dset_report.append("      -> Dataset vide ou invalide.")
 
-                        print(f"   📊 Statistiques globales :")
-                        print(f"       -> Min : {s['min_val']:.4f}")
-                        print(f"       -> Max : {s['max_val']:.4f}")
-                        
-                        # Alerte si les valeurs sont trop grandes pour du Float16 (AMP)
-                        # Limite Float16 ~ 65500
-                        if abs(s['max_val']) > 65000 or abs(s['min_val']) > 65000:
-                            print(f"       ⚠️ WARNING AMP : Valeurs > 65000 (Risque d'Overflow en Float16)")
-
-                        # Vérification de "signaux plats"
-                        total_elements = np.prod(obj.shape)
-                        zero_ratio = (s["total_zeros"] / total_elements) * 100
-                        print(f"       -> Zéros : {zero_ratio:.2f}% du volume total")
-                    
-                    else:
-                        print(f"   ℹ️  Données non-numériques (ignorées pour stats min/max)")
-
-            f.visititems(visit_node)
+            report_lines.extend(dset_report)
 
     except Exception as e:
-        print(f"\n[FATAL ERROR] Impossible de lire le fichier : {e}")
+        return f"{header}\n[ERREUR FATALE] Échec lecture : {e}\n"
 
-    print(f"\n{'='*80}\n")
+    return "\n".join(report_lines)
+
+
+def main():
+    """
+    Point d'entrée principal.
+    """
+    parser = argparse.ArgumentParser(description="Inspecteur HDF5 'tracing' (Full Load)")
+    parser.add_argument('--input', type=str, default='../output/final_data/train', help="Dossier contenant les fichiers .hdf5")
+    
+    # Gestion du nombre de workers
+    default_workers = max(1, os.cpu_count() - 1)
+    parser.add_argument('--workers', type=int, default=default_workers, help=f"Nombre de processus (défaut: {default_workers})")
+
+    args = parser.parse_args()
+    input_dir = Path(args.input)
+
+    # 1. Validation du dossier
+    if not input_dir.exists():
+        print(f"[ERREUR] Dossier introuvable : {input_dir}")
+        sys.exit(1)
+
+    # 2. Collecte des fichiers
+    files = list(input_dir.glob("*.hdf5"))
+    if not files:
+        print("[INFO] Aucun fichier .hdf5 trouvé.")
+        sys.exit(0)
+
+    print(f"[INFO] Analyse de {len(files)} fichiers (Cible: 'tracing').")
+    print(f"[INFO] Mode : Chargement intégral en RAM.")
+    print(f"[INFO] Workers actifs : {args.workers}\n")
+
+    # 3. Lancement du Pool de Processus
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        future_to_file = {executor.submit(process_single_file, f): f for f in files}
+
+        with tqdm(total=len(files), desc="Progression", unit="file") as pbar:
+            for future in as_completed(future_to_file):
+                file_path = future_to_file[future]
+                try:
+                    report = future.result()
+                    tqdm.write(report)
+                except Exception as exc:
+                    tqdm.write(f"\n[EXCEPTION MAIN] Erreur sur {file_path.name} : {exc}")
+                finally:
+                    pbar.update(1)
+
+    print(f"\n{'='*80}")
+    print("[TERMINE] Audit complet effectué.")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Inspecteur HDF5 exhaustif (Détection NaN/Inf/MinMax)")
-    parser.add_argument('file', type=str, help="Chemin vers le fichier .hdf5")
-    args = parser.parse_args()
-    
-    inspect_h5_thorough(args.file)
+    main()
