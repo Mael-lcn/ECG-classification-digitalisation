@@ -1,216 +1,314 @@
+import sys
+from pathlib import Path
+
+# On ajoute le dossier parent de 'src' au chemin de recherche
+root = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root))
+
 import h5py
-import numpy as np
-import os
-import argparse
 import glob
-import multiprocessing
-import random
+import os
+import torch
+import bisect
+import pandas as pd
+import numpy as np
+
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
+
+from src.dataset.normalization import TARGET_FREQ
 
 
 
-def analyze_dataset_chunked(dset, chunk_size=2048):
+MAX_TEMPS = 144
+MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
+
+
+class LargeH5Dataset(Dataset):
     """
-    Analyse un dataset HDF5 par morceaux pour extraire les statistiques sans charger la mémoire.
+    Dataset PyTorch optimisé pour la lecture séquentielle de données volumineuses.
 
-    Cette méthode itère sur le dataset par blocs pour éviter de saturer la RAM,
-    même sur des fichiers très volumineux.
+    Ce dataset gère des données fragmentées en multiples paires de fichiers HDF5 (tracés) 
+    et CSV (labels).
 
-    Args:
-        dset (h5py.Dataset): L'objet dataset HDF5 à analyser.
-        chunk_size (int, optional): Taille du buffer de lecture en nombre d'échantillons. 
-            Défaut à 2048.
+    Stratégie de gestion mémoire :
+        1. Initialisation légère : Seule la structure (taille des fichiers) est chargée.
+        2. Lazy Loading : Les fichiers sont ouverts uniquement lorsque nécessaire.
+        3. Cache Séquentiel : En lecture séquentielle (shuffle=False), le fichier courant 
+           et son CSV de labels restent ouverts en mémoire, évitant les réouvertures constantes.
 
-    Returns:
-        dict: Dictionnaire contenant les clés suivantes :
-            - has_nan (bool): True si des NaN sont détectés.
-            - has_inf (bool): True si des valeurs infinies sont détectées.
-            - min_val (float): La valeur minimale trouvée.
-            - max_val (float): La valeur maximale trouvée.
+    Attributes:
+        classes (list): Liste des noms de classes cibles, définit l'ordre du vecteur one-hot.
+        h5_paths (list): Chemins triés des fichiers .hdf5.
+        csv_paths (list): Chemins triés des fichiers .csv.
+        cumulative_sizes (list): Index cumulatifs permettant de mapper un index global (0..N) 
+                                 vers un fichier spécifique.
+        total_length (int): Nombre total d'échantillons disponibles.
     """
-    stats = {
-        "has_nan": False,
-        "has_inf": False,
-        "min_val": float('inf'),
-        "max_val": float('-inf')
-    }
-    
-    total_samples = dset.shape[0]
 
-    for i in range(0, total_samples, chunk_size):
-        # Lecture du chunk
-        chunk = dset[i : i + chunk_size]
+    def __init__(self, input_dir, classes_list, use_static_padding=False):
+        """
+        Initialise le dataset en scannant le répertoire cible.
 
-        # On ignore les données non numériques (ex: strings)
-        if not np.issubdtype(chunk.dtype, np.number):
-            continue
+        Args:
+            input_dir (str): Chemin du dossier contenant les fichiers .hdf5 et .csv.
+            classes_list (list): Liste ordonnée des classes (ex: ['AFIB', 'SR', ...]). 
+                                 Essentiel pour garantir la cohérence des labels.
+        """
+        self.classes = classes_list
+        self.num_classes = len(classes_list)
 
-        # Détection NaN / Inf
-        if np.isnan(chunk).any():
-            stats["has_nan"] = True
-        
-        if np.isinf(chunk).any():
-            stats["has_inf"] = True
+        self.use_static_padding = use_static_padding
 
-        # Calcul Min/Max (en ignorant les NaN pour ne pas fausser le min/max)
-        try:
-            # Note: Si le chunk est vide ou full-NaN, cela peut lever une erreur ou warning
-            if chunk.size > 0:
-                current_min = np.nanmin(chunk)
-                current_max = np.nanmax(chunk)
-                
-                if current_min < stats["min_val"]:
-                    stats["min_val"] = current_min
-                
-                if current_max > stats["max_val"]:
-                    stats["max_val"] = current_max
-        except ValueError:
-            pass 
+        # Ces variables servent à garder le fichier courant ouvert
+        self.file_handle = None          # Pointeur vers le fichier H5 ouvert
+        self.current_file_idx = -1       # Index du fichier actuellement ouvert
+        self.current_labels_map = {}     # Cache des labels du fichier courant (ID -> Vector)
+        self.cumulative_sizes = []       # Carte de navigation des index
 
-    return stats
+        all_h5 = sorted(glob.glob(os.path.join(input_dir, '*.hdf5')))
 
+        self.h5_paths = []
+        self.csv_paths = []
 
-def worker_inspect_file(file_path):
-    """
-    Fonction exécutée par un processus travailleur pour inspecter un fichier unique.
+        print(f"Vérification de l'intégrité des paires H5/CSV...")
 
-    Args:
-        file_path (str): Chemin absolu vers le fichier .hdf5 à inspecter.
+        for h5_p in all_h5:
+            # On déduit le nom du CSV attendu à partir du nom du H5
+            base_name = os.path.splitext(h5_p)[0] # enleve .hdf5
+            expected_csv = base_name + '.csv'
 
-    Returns:
-        dict: Un dictionnaire de rapport contenant :
-            - file (str): Nom du fichier.
-            - status (str): 'OK', 'CORRUPT', 'WARNING' ou 'ERROR'.
-            - report (list[str]): Liste des messages d'erreurs ou d'avertissements.
-    """
-    filename = os.path.basename(file_path)
-    report_lines = []
-    status = "OK"
-    
-    try:
-        with h5py.File(file_path, 'r') as f:
-            datasets_found = 0
-            
-            def visit_node(name, obj):
-                nonlocal status, datasets_found
-                
-                # On ne traite que les datasets numériques
-                if isinstance(obj, h5py.Dataset) and np.issubdtype(obj.dtype, np.number):
-                    datasets_found += 1
-                    s = analyze_dataset_chunked(obj)
+            if os.path.exists(expected_csv):
+                self.h5_paths.append(h5_p)
+                self.csv_paths.append(expected_csv)
+            else:
+                # Si le CSV manque, on ignore aussi le HDF5 pour éviter le décalage
+                print(f"ATTENTION: CSV manquant pour {os.path.basename(h5_p)}. Fichier ignoré.")
 
-                    # 1. Vérification intégrité numérique
-                    if s["has_nan"]:
-                        status = "CORRUPT"
-                        report_lines.append(f"[DATASET] {name} -> CONTIENT DES NAN")
-                    
-                    if s["has_inf"]:
-                        status = "CORRUPT"
-                        report_lines.append(f"[DATASET] {name} -> CONTIENT DES INFINIS")
+        # Vérification de l'intégrité des paires de fichiers
+        if len(self.h5_paths) != len(self.csv_paths):
+            raise ValueError(f"Mismatch: {len(self.h5_paths)} fichiers H5 vs {len(self.csv_paths)} fichiers CSV.")
 
-                    # 2. Vérification débordement Float16 (AMP)
-                    # La limite float16 est 65504. Au-delà, risque d'overflow en entraînement mixte.
-                    limit_fp16 = 65500
-                    if abs(s['max_val']) > limit_fp16 or abs(s['min_val']) > limit_fp16:
-                        report_lines.append(f"[DATASET] {name} -> WARNING AMP: Valeurs hors limites Float16 (Min:{s['min_val']:.1f}, Max:{s['max_val']:.1f})")
+        # On ouvre brièvement chaque fichier pour connaître sa taille sans charger les données
+        cumul = 0
+        print(f"Initialisation du Dataset: Scan de {len(self.h5_paths)} fichiers...")
 
-            # Parcours récursif du fichier
-            f.visititems(visit_node)
-            
-            if datasets_found == 0:
-                status = "WARNING"
-                report_lines.append("Aucun dataset numérique trouvé.")
+        # Calcul la taille cumulé
+        for p in self.h5_paths:
+            with h5py.File(p, 'r') as f:
+                cumul += f['exam_id'].shape[0]
 
-    except Exception as e:
-        status = "ERROR"
-        report_lines.append(f"ERREUR CRITIQUE DE LECTURE: {str(e)}")
+            self.cumulative_sizes.append(cumul)
 
-    return {
-        "file": filename,
-        "status": status,
-        "report": report_lines
-    }
+        self.total_length = cumul
+
+        self.all_lengths = np.concatenate([pd.read_csv(c, usecols=['length'])['length'].values for c in self.csv_paths])
+
+        print(f"Dataset prêt : {self.total_length} échantillons au total.")
 
 
-def main():
-    """
-    Point d'entrée principal du script.
-    
-    Orchestre la recherche de fichiers, la sélection aléatoire et l'exécution parallèle.
-    """
-    # Configuration des arguments
-    parser = argparse.ArgumentParser(description="Inspection aléatoire et parallèle de fichiers HDF5.")
-    parser.add_argument('--input_dir', type=str, required=True, 
-                        help="Répertoire racine contenant les fichiers .hdf5")
-    
-    # Par défaut, on utilise tous les cœurs disponibles
-    parser.add_argument('--workers', type=int, default=os.cpu_count(), 
-                        help=f"Nombre de fichiers à inspecter (et de cœurs à utiliser). Défaut: {os.cpu_count()}")
-    
-    args = parser.parse_args()
+    def __len__(self):
+        """Retourne la taille totale du dataset (tous fichiers confondus)."""
+        return self.total_length
 
-    # 1. Recherche des fichiers
-    search_pattern = os.path.join(args.input_dir, "**/*.hdf5")
-    all_files = glob.glob(search_pattern, recursive=True)
 
-    # Fallback si pas de récursivité
-    if not all_files:
-        all_files = glob.glob(os.path.join(args.input_dir, "*.hdf5"))
+    def __getitem__(self, idx):
+        """
+        Récupère un échantillon et son label correspondant.
 
-    total_files = len(all_files)
-    if total_files == 0:
-        print(f"[ERREUR] Aucun fichier .hdf5 trouvé dans : {args.input_dir}")
-        return
+        Args:
+            idx (int): Index global de l'échantillon demandé.
 
-    # 2. Échantillonnage Aléatoire
-    # On ne peut pas inspecter plus de fichiers qu'il n'y en a
-    nb_to_inspect = min(args.workers, total_files)
+        Returns:
+            tuple: (tracing_tensor, label_tensor)
+                - tracing_tensor (torch.Tensor): Forme (12, Time), type Float.
+                - label_tensor (torch.Tensor): Forme (Num_Classes,), type Float (Multi-hot/One-hot).
+        """
+        # A. Localisation de la donnée
+        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
 
-    random.seed() # Initialisation du générateur aléatoire
-    selected_files = random.sample(all_files, nb_to_inspect)
-
-    print(f"{'-'*60}")
-    print(f"RAPPORT D'INSPECTION HDF5")
-    print(f"Dossier source : {args.input_dir}")
-    print(f"Total fichiers disponibles : {total_files}")
-    print(f"Fichiers sélectionnés (Random) : {nb_to_inspect}")
-    print(f"Processus parallèles (Workers) : {nb_to_inspect}")
-    print(f"{'-'*60}\n")
-
-    # 3. Exécution Parallèle
-    # On crée un pool exactement de la taille de l'échantillon pour que chaque fichier ait son worker
-    with multiprocessing.Pool(processes=nb_to_inspect) as pool:
-        # map bloque jusqu'à ce que tous les résultats soient prêts
-        results = pool.map(worker_inspect_file, selected_files)
-
-    # 4. Affichage des résultats
-    files_corrupt = 0
-    files_ok = 0
-    
-    for res in results:
-        status = res["status"]
-        filename = res["file"]
-        report = res["report"]
-
-        if status == "OK":
-            files_ok += 1
-            print(f"[OK] {filename}")
+        # Calcul de l'index local à l'intérieur de ce fichier spécifique
+        if file_idx == 0:
+            local_idx = idx
         else:
-            files_corrupt += 1
-            print(f"[{status}] {filename}")
-            for line in report:
-                print(f"    - {line}")
+            local_idx = idx - self.cumulative_sizes[file_idx - 1]
 
-    # 5. Résumé final
-    print(f"\n{'-'*60}")
-    print(f"BILAN DE L'ECHANTILLONNAGE")
-    print(f"{'-'*60}")
+        # B. Gestion des ressources
+        # Si le fichier demandé n'est pas celui actuellement ouvert, on change de fichier
+        if self.current_file_idx != file_idx:
+            self.load_new_file_resources(file_idx)
+
+        # C. Lecture des données brutes
+        tracing_data = self.file_handle['tracings'][local_idx]
+        raw_id = self.file_handle['exam_id'][local_idx]
+
+        # D. Traitement de l'ID
+        if hasattr(raw_id, 'decode'):
+            exam_id_str = raw_id.decode('utf-8')
+        else:
+            # Sinon (c'est un int, un float, ou déjà une str), on convertit simplement en string
+            exam_id_str = str(raw_id)
+
+        csv_id_str = self.current_csv_idx[local_idx]
+
+        # Test de désynchronisation des données
+        if exam_id_str != csv_id_str:
+            raise ValueError(f"CRITICAL DATA MISMATCH at idx {idx} (local {local_idx}): "
+                             f"H5 ID={exam_id_str} vs CSV ID={csv_id_str}. "
+                             f"Le CSV n'est pas trié dans le même ordre que le HDF5 !")
+
+        # Récupère les indexs de starts et la taille des signaux
+        start = self.current_starts[local_idx]
+        length = self.current_lenghts[local_idx]
+
+        # Si on garde le padding
+        if self.use_static_padding:
+            tracing_tensor = torch.from_numpy(tracing_data).float()
+        else:
+            # Récupère la partie T utile
+            tracing_tensor = torch.from_numpy(tracing_data[:, start : start + length]).float()
+
+        # E. Récupération du Label
+        # On pioche dans le dictionnaire pré-chargé en mémoire
+        label_vec = self.current_labels_map.get(exam_id_str)
+
+        # F. Conversion en Tensors PyTorch
+        label_tensor = torch.from_numpy(label_vec).float()
+
+        if torch.isnan(label_tensor).any():
+            raise ValueError(f"[LABEL CORRUPTED] NaN détecté dans les labels pour {exam_id_str} \n {label_tensor}")
+
+
+        return tracing_tensor, label_tensor, length
+
+
+    def load_new_file_resources(self, file_idx):
+        """
+        Méthode interne pour gérer la transition entre deux fichiers.
+        Ferme les ressources précédentes et charge les nouvelles métadonnées en RAM.
+        
+        Args:
+            file_idx (int): L'index du nouveau fichier à ouvrir dans `self.h5_paths`.
+        """
+        # 1. Nettoyage : Fermer l'ancien fichier s'il est ouvert
+        if self.file_handle is not None:
+            self.file_handle.close()
+
+        # 2. Ouverture : Nouveau fichier HDF5
+        self.file_handle = h5py.File(self.h5_paths[file_idx], 'r')
+
+        # 3. Chargement du csv
+        df = pd.read_csv(self.csv_paths[file_idx])
+
+        # Récupère les positions effectives des tracés
+        self.current_starts = df['start_offset'].values
+        self.current_lenghts = df['length'].values
+
+        # 4. Alignement des colonnes
+        # On s'assure que les colonnes du CSV correspondent exactement à self.classes
+        # `reindex` ajoute des 0 si une classe est manquante dans ce fichier CSV
+        df_labels = df.reindex(columns=self.classes, fill_value=0)
+
+        df_labels.fillna(0.0, inplace=True)
+
+        labels_matrix = df_labels.astype(np.float32).values
+        ids = df['exam_id'].astype(str).values
+
+        self.current_csv_idx = ids
+
+        # 5. Mise en Cache : Création du dictionnaire ID -> Label
+        self.current_labels_map = dict(zip(ids, labels_matrix))
+
+        # Mise à jour de l'état
+        self.current_file_idx = file_idx
+
+
+    def __del__(self):
+        """
+        Destructeur : Garantit la fermeture propre du fichier HDF5 
+        lorsque l'objet Dataset est détruit ou que le script se termine.
+        """
+        # On vérifie que l'attribut existe et n'est pas None avant de fermer
+        if hasattr(self, 'file_handle') and self.file_handle is not None:
+            try:
+                self.file_handle.close()
+            except Exception:
+                pass    # Évite de lever une erreur lors de l'arrêt du programme
+
+
+
+
+
+
+def ecg_collate_wrapper(batch, use_static_padding=False, fixed_length=MAX_SIGNAL_LENGTH):
+    """
+    Transforme une liste d'échantillons de tailles variables en un Batch PyTorch.
+
+    Cette fonction harmonise les dimensions temporelles des signaux pour qu'ils puissent être empilés dans un seul tenseur.
     
-    if files_corrupt == 0:
-        print(f"SUCCES : Les {nb_to_inspect} fichiers testés sont valides.")
+    Elle propose deux stratégies via 'use_static_padding' :
+    1. use_static_padding=False (Dynamique) : Idéal pour les RNN/Transformer/FCNN.
+       Le batch est paddé à la longueur du signal le plus long de ce batch.
+       Ex: Si le max du batch est 4500, tout le monde est paddé à 4500.
+       
+    2. use_static_padding=True (Universel) : Idéal pour les CNN classiques (avec couches Dense).
+       Le batch est forcé à une taille fixe 'fixed_length'.
+       - Trop court ? Padding (zéros à la fin).
+       - Trop long ? Cropping (on coupe la fin).
+
+    Args:
+        batch (list): Liste de tuples [(signal, label), ...] fournie par le Dataset.
+                      - signal : Tensor de forme (Channels=12, Time=Variable)
+                      - label  : Tensor de forme (NumClasses,) ou scalaire.
+        use_static_padding (bool): Si True, utilise le padding universel.
+                           Si False pad dynamyquement.
+        fixed_length (int): La taille cible temporelle (T) pour le mode universel.
+
+    Returns:
+        tuple: (padded_signals, stacked_labels)
+               - padded_signals : Tensor (Batch, 12, T_Finale)
+               - stacked_labels : Tensor (Batch, NumClasses)
+    """
+    signals, labels, length = zip(*batch)
+    # Transpose (Channels, Time) -> (Time, Channels) car pad_sequence travaille sur la dimension 0 (Time)
+    signals = [s.T for s in signals]
+
+    # Option 1 : Padding dynamique
+    if not use_static_padding:
+        # pad_sequence trouve automatiquement le max du batch et comble les trous
+        # batch_first=True -> Sortie : (Batch, Max_Time_du_Batch, 12)
+        padded_batch = pad_sequence(signals, batch_first=True, padding_value=0.0)
+
+    # Option 2 : Padding/Cropping fixe
     else:
-        print(f"ECHEC : {files_corrupt} fichiers problématiques détectés sur {nb_to_inspect}.")
-        print("Il est recommandé de nettoyer le dataset ou de vérifier la chaîne de production des données.")
+        # On doit traiter chaque signal individuellement pour atteindre 'fixed_length'
+        processed_signals = []
 
+        for s in signals:
+            current_len = s.shape[0] # Dimension Time (car on a transposé au début)
 
-if __name__ == "__main__":
-    main()
+            if current_len == fixed_length:
+                processed_signals.append(s)
+
+            elif current_len < fixed_length:    # Le signal est trop court
+                diff = fixed_length - current_len
+                # F.pad sur (Time, 12) -> (Pad_Left, Pad_Right, Pad_Top, Pad_Bottom)
+                padded = F.pad(s, (0, 0, 0, diff), "constant", 0.0)
+                processed_signals.append(padded)
+
+            else:   # Le signal est trop long
+                # On ne garde que les 'fixed_length' premiers points temporels
+                cropped = s[:fixed_length, :]
+                processed_signals.append(cropped)
+
+        # On empile la liste pour créer le tenseur (Batch, Fixed_Length, 12)
+        padded_batch = torch.stack(processed_signals)
+
+    # Remise en forme standard (Batch, Channels, Time)
+    padded_signals = padded_batch.transpose(1, 2)
+
+    # Empilage des labels
+    stacked_labels = torch.stack(labels)
+
+    return padded_signals, stacked_labels, length
