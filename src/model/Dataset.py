@@ -177,7 +177,10 @@ class LargeH5Dataset(Dataset):
         label_tensor = torch.from_numpy(label_vec).float()
 
         if torch.isnan(label_tensor).any():
-            raise ValueError(f"[LABEL CORRUPTED] NaN détecté dans les labels pour {exam_id_str} \n {label_tensor}")
+            print(f"[LABEL CORRUPTED] NaN détecté dans les labels pour {exam_id_str} \n {label_tensor}")
+
+        #if torch.isnan(tracing_tensor).any():
+         #   print(f"[tracings CORRUPTED] NaN détecté dans les labels pour {exam_id_str} \n {label_tensor}")
 
 
         return tracing_tensor, label_tensor, length

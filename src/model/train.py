@@ -191,7 +191,7 @@ def run(args):
     # 1. Configuration Matérielle
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        use_amp = args.use_amp
+        use_amp = args.not_use_amp
         torch.backends.cudnn.benchmark = args.use_static_padding
         print("[INIT] Mode: CUDA")
     else:
@@ -429,8 +429,8 @@ def main():
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
     parser.add_argument('--use_static_padding', action='store_true', default=False,
                         help="Force une taille de padding fixe (universelle).")
-    parser.add_argument('--use_amp', action='store_false', default=True,
-                        help="Active l'Automatic Mixed Precision (AMP). Si omis, l'entraînement est en FP32 (plus stable).")
+    parser.add_argument('--not_use_amp', action='store_false', default=True,
+                        help="Désactive l'Automatic Mixed Precision (AMP). Si mis, l'entraînement est en FP32 (plus stable).")
 
     # Arguments Système
     parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count(),
