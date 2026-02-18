@@ -61,7 +61,7 @@ def get_dataset_stats(data):
 
 def process_single_file(file_path):
     """
-    Worker Function : Charge uniquement la clé 'tracing'.
+    Worker Function : Charge uniquement la clé 'tracings'.
     """
     file_name = file_path.name
     report_lines = []
@@ -74,11 +74,11 @@ def process_single_file(file_path):
         with h5py.File(file_path, 'r') as f:
 
             # Récupération du dataset
-            dset = f['tracing']
+            dset = f['tracings']
 
             # Vérification type
             if not np.issubdtype(dset.dtype, np.number):
-                return f"{header}\n[SKIP] Le dataset 'tracing' n'est pas numérique.\n"
+                return f"{header}\n[SKIP] Le dataset 'tracings' n'est pas numérique.\n"
 
             # Charge tout le tenseur (B, C, T) en RAM
             data = dset[:]
@@ -87,7 +87,7 @@ def process_single_file(file_path):
             s = get_dataset_stats(data)
 
             # Construction du rapport
-            dset_report = [f"\n   [TARGET] 'tracing' | Shape: {dset.shape} | Type: {dset.dtype}"]
+            dset_report = [f"\n   [TARGET] 'tracings' | Shape: {dset.shape} | Type: {dset.dtype}"]
 
             # --- ALERTES ---
             if s["has_nan"]:
@@ -122,7 +122,7 @@ def main():
     """
     Point d'entrée principal.
     """
-    parser = argparse.ArgumentParser(description="Inspecteur HDF5 'tracing' (Full Load)")
+    parser = argparse.ArgumentParser(description="Inspecteur HDF5 'tracings' (Full Load)")
     parser.add_argument('--input', type=str, default='../output/final_data/train', help="Dossier contenant les fichiers .hdf5")
     
     # Gestion du nombre de workers
@@ -143,7 +143,7 @@ def main():
         print("[INFO] Aucun fichier .hdf5 trouvé.")
         sys.exit(0)
 
-    print(f"[INFO] Analyse de {len(files)} fichiers (Cible: 'tracing').")
+    print(f"[INFO] Analyse de {len(files)} fichiers (Cible: 'tracings').")
     print(f"[INFO] Mode : Chargement intégral en RAM.")
     print(f"[INFO] Workers actifs : {args.workers}\n")
 

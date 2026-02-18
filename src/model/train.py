@@ -429,7 +429,7 @@ def main():
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
     parser.add_argument('--use_static_padding', action='store_true', default=False,
                         help="Force une taille de padding fixe (universelle).")
-    parser.add_argument('--use_amp', action='store_true', default=False,
+    parser.add_argument('--use_amp', action='store_false', default=True,
                         help="Active l'Automatic Mixed Precision (AMP). Si omis, l'entraînement est en FP32 (plus stable).")
 
     # Arguments Système
