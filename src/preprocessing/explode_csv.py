@@ -46,3 +46,5 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, default='../../../data/15_prct/')
 
     args = parser.parse_args()
+
+    run(args)
