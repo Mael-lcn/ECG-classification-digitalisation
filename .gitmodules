@@ -1,0 +1,3 @@
+[submodule "ecg-image-kit"]
+	path = ecg-image-kit
+	url = https://github.com/Mael-lcn/ecg-image-kit.git
