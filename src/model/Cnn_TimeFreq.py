@@ -5,7 +5,7 @@ import torchaudio
 
 
 class CNN_TimeFreq(nn.Module):
-    def __init__(self, num_classes=27, in_channels=12, sample_rate=400, n_fft=128, hop_length=64,
+    def __init__(self, num_classes=27, in_channels=12, n_fft=128, hop_length=64,
             win_length=128, ch1=32, ch2=64, ch3=128, dropout=0.5, use_batchnorm=True, use_fcnn=False,
             window_size=(4, 4), **kwargs): 
         """
@@ -13,7 +13,6 @@ class CNN_TimeFreq(nn.Module):
         
         :param num_classes: Number of output classes (default 27)
         :param in_channels: Number of ECG leads (default 12)
-        :param sample_rate: Description
         :param n_fft: Number of points used in the Fourier Transform (frequency resolution)
         :param hop_length: Window sliding stride (how much the window slide each step)
         :param win_length: Window size in samples

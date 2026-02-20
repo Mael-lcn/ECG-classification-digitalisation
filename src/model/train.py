@@ -422,6 +422,12 @@ def main():
     parser.add_argument('--model', type=int, default=0,
                         help=f"Quel modèle voulez-vous entrainer: {options}")
 
+    # :param n_fft: Number of points used in the Fourier Transform (frequency resolution)
+    # :param hop_length: Window sliding stride (how much the window slide each step)
+    # :param win_length: Window size in samples
+
+
+
     # Hyperparamètres
     parser.add_argument('--batch_size', type=int, default=64, help="Taille du batch")
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
