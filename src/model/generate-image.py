@@ -3,18 +3,13 @@ import torch
 import cv2
 import h5py
 import torchvision.utils as vutils
-import scipy.signal # <--- NOUVEL IMPORT NÉCESSAIRE
+import scipy.signal
 
 
 
 def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=4096, scale_y=16.0):
     B, C, T = tracings.shape
-    
-    # Gestion du padding si le signal est plus court que le segment
-    if T < segment_size:
-        padding_size = segment_size - T
-        tracings = torch.nn.functional.pad(tracings, (0, padding_size), "constant", 0)
-    
+
     step = segment_size
     segments = tracings.unfold(2, segment_size, step)
     B, C, N, S = segments.shape
@@ -30,7 +25,7 @@ def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=
                 # 1. Récupération du signal brut
                 sig_raw = segments[b, i, n, :].numpy()
 
-                # --- ÉTAPE DE NETTOYAGE (NOUVEAU) ---
+                # --- ÉTAPE DE NETTOYAGE ---
                 # On estime la ligne de base avec un filtre médian large.
                 # kernel_size doit être impair. On prend environ 5% de la longueur du signal.
                 kernel_size = int(S * 0.05)
@@ -38,17 +33,16 @@ def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=
 
                 # baseline est la "vague" lente
                 baseline = scipy.signal.medfilt(sig_raw, kernel_size)
-                
+
                 # On soustrait la vague pour avoir un signal plat (sig_clean)
                 sig_clean = sig_raw - baseline
-                # ------------------------------------
 
                 # Ligne 0 gris clair
                 cv2.line(img, (0, offsets[i]), (w, offsets[i]), (230, 230, 230), 1)
 
                 x_coords = np.linspace(0, w - 1, S).astype(int)
                 
-                # 2. On utilise le signal NETTOYÉ pour le tracé
+                # 2. On utilise le signal nottoyé pour le tracé
                 y_coords = (offsets[i] - sig_clean * scale_y).astype(int)
                 y_coords = np.clip(y_coords, 0, h - 1)
 
@@ -64,15 +58,12 @@ def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=
 
 
 if __name__ == "__main__":
-    # ... (le reste de ton bloc main reste identique) ...
-    # Utilise la nouvelle fonction : create_image_12leads_optimized_cleaned
     file_path = "../../../exams_part0.hdf5"
 
     with h5py.File(file_path, 'r') as f:
         tracings  = torch.from_numpy(f['tracings'][:10]).permute(0, 2, 1)
 
     images_tensor = create_image_12leads_optimized_cleaned(tracings, h=518, w=518)
-
 
     # 2. On "aplatit" pour l'export (on prend tous les segments de tous les batchs)
     # On passe de (B, N, 3, 518, 518) à (B*N, 3, 518, 518)
