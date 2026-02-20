@@ -4,6 +4,8 @@ import json
 import argparse
 import numpy as np
 import torch
+from functools import partial
+
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import multiprocessing
@@ -12,8 +14,15 @@ import csv
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from dataset import LargeH5Dataset
-from model import CNN
+from Dataset import LargeH5Dataset, ecg_collate_wrapper
+from Sampler import MegaBatchSortishSampler
+from Cnn import CNN
+
+
+
+torch.set_float32_matmul_precision('high')  # Test d'optimisation
+# Supprime la limite de recompilation pour éviter les crashs avec torch.compile
+torch._dynamo.config.recompile_limit = 6000
 
 
 # Compute recording-wise accuracy.
@@ -183,9 +192,13 @@ def evaluate(model, dataloader, device, threshold):
     all_labels, all_probs, all_binary = [], [], []
 
     with torch.no_grad():
-        for x, y in tqdm(dataloader, desc="[EVAL]"):
+        for x, y, _ in tqdm(dataloader, desc="[EVAL]"):
             x = x.to(device)
             y = y.to(device)
+
+            if x.shape[-1] == 0:
+                print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
+                continue # Passe à l'ECG suivant au lieu de faire crash le modèle
 
             probs = model(x)
             #probs = torch.sigmoid(logits) # already applied in the model forward
@@ -273,16 +286,22 @@ def load_weights(weights_file):
 
     return classes, weights
 
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default="../output/final_data/test", help="HDF5 test dataset directory")
     parser.add_argument('--checkpoint', default="checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
     parser.add_argument('--class_map', default='../../ressources/final_class.json', help="JSON ordered class list")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('-o', '--output', type=str, default="../output/evaluation")
+
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--threshold', type=float, default=0.5)
-    parser.add_argument('-o', '--output', type=str, default="output/evaluation")
-    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-2)
+    parser.add_argument('--use_static_padding', action='store_true', default=False,
+                        help="Force une taille de padding fixe (universelle).")
+
+    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
 
     args = parser.parse_args()
 
@@ -302,20 +321,26 @@ def main():
     assert weight_classes == classes, "Class order mismatch with weights.csv"
 
     # Dataset
-    dataset = LargeH5Dataset(args.data, classes_list=class_list)
+    dataset = LargeH5Dataset(args.data, classes_list=class_list,  use_static_padding=False)
+
+    collate_fn = partial(ecg_collate_wrapper, use_static_padding=args.use_static_padding)
+
+    # Création des Samplers et Loaders
+    train_sampler = MegaBatchSortishSampler(dataset, batch_size=args.batch_size, mega_batch_factor=50, shuffle=True)
+
     loader = DataLoader(
-        dataset=dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False, 
-        num_workers=args.workers,      
-        pin_memory=True,               
-        persistent_workers=True,  
-        prefetch_factor=2
+        dataset, collate_fn=collate_fn, batch_sampler=train_sampler, 
+        num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
     )
+
 
     # Model
     model = CNN(num_classes=len(class_list)).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    # Nettoyage des clés '_orig_mod' si modèle compilé
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
+    model.load_state_dict(state_dict, strict=False)
+
     model = torch.compile(model)
 
     print('Evaluating model...')
@@ -355,4 +380,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
     main()
