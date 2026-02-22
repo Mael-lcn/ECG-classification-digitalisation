@@ -11,6 +11,8 @@ from tqdm import tqdm
 import multiprocessing
 import csv
 
+import wandb
+
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
@@ -21,6 +23,12 @@ from Cnn import CNN
 
 
 torch.set_float32_matmul_precision('high')  # Test d'optimisation
+
+# ==============================================================================
+# CONFIGURATION SYSTÈME
+# ==============================================================================
+# Liste des modèles disponibles
+model_list = [CNN]
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
 
@@ -300,6 +308,9 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--use_static_padding', action='store_true', default=False,
                         help="Force une taille de padding fixe (universelle).")
+    options = ", ".join([f"{i}: {model.__name__}" for i, model in enumerate(model_list)])
+    parser.add_argument('--model', type=int, default=0,
+                        help=f"Quel modèle voulez-vous évaluer: {options}")
 
     parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
 
@@ -320,6 +331,31 @@ def main():
     weight_classes, weights = load_weights(args.weights)
     assert weight_classes == classes, "Class order mismatch with weights.csv"
 
+
+    # ================= CONFIGURATION WANDB ================= 
+
+    os.makedirs(args.output, exist_ok=True)
+
+    os.environ["WANDB_MODE"] = "offline"
+    os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
+    os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
+
+    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
+    checkpoint_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
+    exp_name = f"EVAL_{model_list[args.model].__name__}_{pad_status}_thr{args.threshold}_{checkpoint_name}"
+
+    wandb.init(
+        project="ECG_Classification_Experiments",
+        config=args,
+        name=exp_name,
+        tags=["evaluation", pad_status, "CNN", "offline"]
+    )
+
+    # Définition des axes pour des graphiques cohérents
+    wandb.define_metric("eval/*")
+
+    print(f"Début de l'évaluation : {exp_name}")
+
     # Dataset
     dataset = LargeH5Dataset(args.data, classes_list=class_list,  use_static_padding=False)
 
@@ -335,7 +371,7 @@ def main():
 
 
     # Model
-    model = CNN(num_classes=len(class_list)).to(device)
+    model = model_list[args.model](num_classes=len(class_list)).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     # Nettoyage des clés '_orig_mod' si modèle compilé
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
@@ -362,21 +398,68 @@ def main():
 
     print('Done.')
 
+    # ================= LOGGING WANDB ================= 
+    # Métriques globales
+    metrics = {
+        "eval/AUROC":           auroc,
+        "eval/AUPRC":           auprc,
+        "eval/Accuracy":        acc,
+        "eval/Macro_F1":        f1,
+        "eval/Challenge_Score": challenge,
+        "eval/threshold":       args.threshold,
+    }
+    wandb.log(metrics)
 
-    # Save metrics to CSV
-    fieldnames = ['AUROC', 'AUPRC', 'Accuracy', 'Macro_F1', 'Challenge_Score']
-    values = [auroc, auprc, acc, f1, challenge]
+    # Mise à jour du résumé WandB (visible au premier coup d'oeil sur le dashboard)
+    wandb.run.summary["AUROC"]           = auroc
+    wandb.run.summary["AUPRC"]           = auprc
+    wandb.run.summary["Accuracy"]        = acc
+    wandb.run.summary["Macro_F1"]        = f1
+    wandb.run.summary["Challenge_Score"] = challenge
+    wandb.run.summary["checkpoint"]      = args.checkpoint
 
-    os.makedirs(args.output, exist_ok=True)
+    # Table des métriques par classe (F1 et AUROC)
+    class_table = wandb.Table(columns=["Class", "F1", "AUROC", "AUPRC"])
+    for i, cls in enumerate(classes):
+        f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else None
+        auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else None
+        auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else None
+        class_table.add_data(cls, f1_val, auroc_val, auprc_val)
+
+    wandb.log({"eval/per_class_metrics": class_table})
+
+    # Upload du checkpoint évalué comme artifact
+    print("[WANDB] Upload du checkpoint évalué en cours...")
+    artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
+    if os.path.exists(args.checkpoint):
+        artifact.add_file(args.checkpoint)
+    wandb.log_artifact(artifact)
+
+    wandb.finish()
+
+    # ================= Save CSV ================= 
+
     name = os.path.splitext(os.path.basename(args.checkpoint))[0]
-    output_csv = os.path.join(args.output, f"{name}_metrics.csv")
 
+    # Overall metrics
+    output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(fieldnames)
-        writer.writerow(values)
+        writer.writerow(['AUROC', 'AUPRC', 'Accuracy', 'Macro_F1', 'Challenge_Score'])
+        writer.writerow([auroc, auprc, acc, f1, challenge])
+    print(f"Overall metrics saved to {output_csv}")
 
-    print(f"Evaluation metrics saved to {output_csv}")
+    # Per-class metrics
+    output_csv_per_class = os.path.join(args.output, f"{name}_metrics_per_class.csv")
+    with open(output_csv_per_class, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Class', 'F1', 'AUROC', 'AUPRC'])
+        for i, cls in enumerate(classes):
+            f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else 'nan'
+            auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else 'nan'
+            auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else 'nan'
+            writer.writerow([cls, f1_val, auroc_val, auprc_val])
+    print(f"Per-class metrics saved to {output_csv_per_class}")
 
 
 if __name__ == "__main__":

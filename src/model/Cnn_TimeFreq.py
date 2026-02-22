@@ -98,4 +98,4 @@ class CNN_TimeFreq(nn.Module):
             x = x.view(x.size(0), -1) # (batch_size, ch3)
             x = self.fc(x) # (batch_size, num_classes)
 
-        return self.fc(x)
+        return x
