@@ -22,6 +22,11 @@ VRAM_LIMIT_GB = 8.64
 current_vram_usage = 0.0
 vram_lock = threading.Condition()
 
+# Contient les noyaux de resample partagé
+global_resamplers = {}
+resamplers_lock = threading.Lock()
+
+
 # Suivi du record de taille
 global_stats = {
     'max_t': 0,
@@ -86,7 +91,7 @@ def unified_worker(task, output):
 
     try:
         # Sélection du device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
         # Lecture des méta données sur CPU
         exam_ids, csv_full = load_metadata(path_h5, path_csv)
@@ -103,29 +108,50 @@ def unified_worker(task, output):
             for i in range(fragment_factor)
         ]
 
-        # Boucle de traitement
+        processed_chunks_cpu = []
+        all_lengths = []
+        all_starts = []
+        all_valid_ids = []
+
+        # ==========================================================
+        # BOUCLE DE TRAITEMENT PAR CHUNKS
+        # ==========================================================
         for i, (start, end) in enumerate(chunks_boundaries):
             if start == end: continue
 
             # A. Chargement (Disque -> GPU)
-            # Charge le tenseur sur 'device'
             chunk_gpu = load_chunk(path_h5, start, end, device)
             chunk_ids_raw = exam_ids[start:end]
 
+            # Extraction subset CSV uniquement
+            chunk_ids_str = [eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) for eid in chunk_ids_raw]
+            chunk_csv = csv_indexed.reindex(chunk_ids_str).reset_index()
+
+            # Supprime les NANs
+            clean_data, chunk_csv = remove_nan_records(
+                {'tracings': chunk_gpu, 'exam_id': chunk_ids_raw}, 
+                chunk_csv
+            )
+
+            # Mise à jour des tenseurs et IDs locaux avec les données saines
+            chunk_gpu = clean_data['tracings']
+            chunk_ids_raw = clean_data['exam_id']
+
+            # Si tout le chunk était corrompu (0 signal restant), on passe au suivant
+            if chunk_gpu.shape[0] == 0:
+                print(f"   -> [{name}] {i+1}/{fragment_factor} ignoré (100% corrompu).", flush=True)
+                continue
+
+            # On sauvegarde les IDs valides pour l'assemblage final
+            all_valid_ids.append(chunk_ids_raw)
+
             # B. Traitement (Resampling / Filtres)
             if mode == 'D1':
-                # Extraction subset CSV uniquement
-                chunk_ids_str = [eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) for eid in chunk_ids_raw]
-                chunk_csv = csv_indexed.reindex(chunk_ids_str).reset_index()
+                # Le resampling crée un nouveau tenseur. On lui passe clean_data.
+                chunk_gpu = re_sampling(clean_data, chunk_csv, global_resamplers, resamplers_lock, fo=TARGET_FREQ)
 
-                temp_data = {'tracings': chunk_gpu, 'exam_id': chunk_ids_raw}
-
-                # Le resampling crée un nouveau tenseur
-                # On écrase 'chunk_gpu' pour libérer l'ancien tenseur via le gc
-                chunk_gpu = re_sampling(temp_data, chunk_csv, fo=TARGET_FREQ)
-
-                # Nettoyage immédiat des objets Python inutiles
-                del temp_data, chunk_csv, chunk_ids_str
+                # Nettoyage immédiat
+                del clean_data, chunk_csv, chunk_ids_str
 
             # C. Normalisation (In-Place pour économiser VRAM)
             z_norm(chunk_gpu)
@@ -143,11 +169,17 @@ def unified_worker(task, output):
 
             # F. Nettoyage GPU
             del chunk_gpu, s_idx, e_idx
-
             print(f"   -> [{name}] {i+1}/{fragment_factor} processed.", flush=True)
 
-        # Assemblage final sur CPU
-        # Calcul des dimensions finales
+        # ==========================================================
+        # ASSEMBLAGE FINAL SUR CPU
+        # ==========================================================
+        # Sécurité absolue : si le fichier entier était corrompu, on l'ignore
+        if not processed_chunks_cpu:
+            print(f"   [SKIP] Fichier {name} entièrement ignoré (100% corrompu).")
+            return
+
+        # Calcul des dimensions finales basées sur les données qui ont survécu
         total_rows = sum(c.shape[0] for c in processed_chunks_cpu)
         max_t = max(c.shape[2] for c in processed_chunks_cpu)
         channels = processed_chunks_cpu[0].shape[1]
@@ -163,24 +195,20 @@ def unified_worker(task, output):
         current_idx = 0
         while processed_chunks_cpu:
             chunk = processed_chunks_cpu.pop()
-
             n, _, t = chunk.shape
 
             # Copie RAM -> RAM
-            # Le slicing [:, :t] protège le padding à droite (qui reste à 0)
             dataset['tracings'][current_idx : current_idx + n, :, :t] = chunk
-
             current_idx += n
 
-            # Suppression explicite
             del chunk
 
-        # Ajout des IDs
-        dataset['exam_id'] = exam_ids
+        # On concatène que les IDs qui ont passé le filtre
+        final_valid_exam_ids = np.concatenate(all_valid_ids)
+        dataset['exam_id'] = final_valid_exam_ids
 
-        # Reconstruction du csv
-        # Conversion IDs pour reindexing
-        final_h5_ids = [eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) for eid in exam_ids]
+        # Reconstruction du csv aligné
+        final_h5_ids = [eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) for eid in final_valid_exam_ids]
         final_csv = csv_indexed.reindex(final_h5_ids).reset_index()
 
         # Injection rapide via Numpy

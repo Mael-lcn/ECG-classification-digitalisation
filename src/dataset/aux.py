@@ -197,7 +197,7 @@ def get_active_boundaries(tracings, threshold=1e-6):
 
 
 
-def re_sampling(data, csv, fo=400):
+def re_sampling(data, csv, shared_resamplers, resamplers_lock, fo=400):
     """
     Rééchantillonne les signaux ECG en les groupant par fréquence et longueur.
 
@@ -235,7 +235,6 @@ def re_sampling(data, csv, fo=400):
     # Allocation du tenseur de destination sur le GPU
     new_tracings = torch.zeros((N, C, max_target_len), dtype=torch.float32, device=device)
 
-    resamplers = {}
     # On itère par groupes homogènes
     grouped = df.groupby(['frequences', 'current_len'])
 
@@ -250,17 +249,22 @@ def re_sampling(data, csv, fo=400):
         sub_batch = tracings[idx_tensor, :, :len_in]
 
         # Initialisation ou réutilisation du module Resample pour noyau partagé
-        if fs_in not in resamplers:
-            resamplers[fs_in] = torchaudio.transforms.Resample(
-                orig_freq=int(fs_in),
-                new_freq=int(fo),
-                resampling_method='sinc_interp_kaiser',
-                lowpass_filter_width=6,
-                rolloff=0.99
-            ).to(device)
+        if fs_in not in shared_resamplers:
+            # On bloque les autres threads le temps de créer le noyau
+            with resamplers_lock:
+                # Double-check au cas où un autre thread l'aurait créé pendant qu'on attendait le verrou
+                if fs_in not in shared_resamplers:
+                    print(f"\n[CACHE GLOBAL] Création du noyau torchaudio {fs_in}Hz -> {fo}Hz sur GPU...")
+                    shared_resamplers[fs_in] = torchaudio.transforms.Resample(
+                        orig_freq=int(fs_in),
+                        new_freq=int(fo),
+                        resampling_method='sinc_interp_kaiser',
+                        lowpass_filter_width=6,
+                        rolloff=0.99
+                    ).to(device)
 
         # Calcul du resampling
-        resampled = resamplers[fs_in](sub_batch)
+        resampled = shared_resamplers[fs_in](sub_batch)
 
         # Libération de l'entrée du bloc immédiatement après calcul
         del sub_batch 
@@ -283,6 +287,63 @@ def re_sampling(data, csv, fo=400):
 """
     Méthode de la partie 2
 """
+def remove_nan_records(data, csv, verbose=False):
+    """
+    Supprime les enregistrements contenant des NaN et synchronise les métadonnées.
+
+    Cette fonction identifie les signaux corrompus (contenant au moins un NaN),
+    les supprime du tenseur 'tracings' et du tableau 'exam_id'. Ensuite, elle
+    filtre le DataFrame 'csv' pour ne conserver que les lignes dont l'exam_id 
+    correspond aux signaux sains restants. Cela garantit un alignement parfait 
+    pour le reste du pipeline.
+
+    Args:
+        data (dict): Dictionnaire contenant :
+            - 'tracings' (torch.Tensor) : Signaux ECG de forme (N, C, T).
+            - 'exam_id' (np.ndarray) : Identifiants d'examen de taille (N,).
+        csv (pd.DataFrame): DataFrame contenant les métadonnées (doit avoir une colonne 'exam_id').
+
+    Returns:
+        tuple: (data_clean, csv_clean)
+            - data_clean (dict) : Le dictionnaire 'data' expurgé des NaN.
+            - csv_clean (pd.DataFrame) : Le CSV synchronisé avec les données restantes.
+    """
+    tracings = data['tracings']
+    exam_ids = data['exam_id']
+
+    # 1. Détection des NaN (fusion de C et T pour une vérification globale)
+    has_nan = torch.isnan(tracings).flatten(start_dim=1).any(dim=1)
+
+    # 2. Création du masque des signaux valides
+    valid_mask = ~has_nan
+
+    # 3. Filtrage du tenseur
+    data['tracings'] = tracings[valid_mask]
+
+    valid_indices = valid_mask.cpu().numpy()
+    valid_exam_ids = exam_ids[valid_indices]
+    data['exam_id'] = valid_exam_ids
+
+    # 4. Filtrage du CSV
+    valid_ids_list = [
+        eid.decode('utf-8') if isinstance(eid, bytes) else str(eid) 
+        for eid in valid_exam_ids
+    ]
+
+    # On force la colonne du CSV en string pour une comparaison sûre, 
+    # puis on ne garde que les lignes présentes dans valid_ids_list
+    csv_clean = csv.copy()
+    csv_clean['exam_id'] = csv_clean['exam_id'].astype(str)
+    csv_clean = csv_clean[csv_clean['exam_id'].isin(valid_ids_list)]
+
+    # Suivi console
+    dropped_count = has_nan.sum().item()
+    if verbose and (dropped_count > 0):
+        print(f"[FILTRE] {dropped_count} enregistrement(s) et métadonnées supprimés à cause de NaN.")
+
+    return data, csv_clean
+
+
 def z_norm(chunk, eps=1e-5):
     """
     Normalisation Z-score (Mean=0, Std=1) effectuée directement sur le tenseur fourni.

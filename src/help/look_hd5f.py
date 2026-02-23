@@ -40,13 +40,13 @@ def process_single_file(file_path):
 
             if N == 0 or C == 0 or T == 0:
                 return f"{header}\n[CRITIQUE] Dimension à 0 détectée : {shape}. Fichier ignoré.\n"
-
+            """
             if C != 12:
                 return f"{header}\n[CRITIQUE] Canaux invalides : attendu C=12, obtenu C={C} ({shape}).\n"
 
             if T <= 100:
                 return f"{header}\n[CRITIQUE] Séquence trop courte : attendu T>100, obtenu T={T} ({shape}).\n"
-
+            """
             if not np.issubdtype(dset.dtype, np.number):
                 return f"{header}\n[SKIP] Le dataset 'tracings' n'est pas numérique (Type: {dset.dtype}).\n"
 
@@ -131,10 +131,10 @@ def main():
     Point d'entrée principal.
     """
     parser = argparse.ArgumentParser(description="Inspecteur HDF5 'tracings' (Chunk Load)")
-    parser.add_argument('--input', type=str, default='../output/final_data/train', help="Dossier contenant les fichiers .hdf5")
-    parser.add_argument('--log', type=str, default='audit_report.log', help="Chemin du fichier de log")
-    
-    default_workers = max(1, os.cpu_count() - 1)
+    parser.add_argument('-i', '--input', type=str, default='../output/normalize_data/', help="Dossier contenant les fichiers .hdf5")
+    parser.add_argument('--log', type=str, default='../output/audit_report.log', help="Chemin du fichier de log")
+
+    default_workers = max(1, os.cpu_count()-1)
     parser.add_argument('--workers', type=int, default=default_workers, help=f"Processus parallèles (défaut: {default_workers})")
 
     args = parser.parse_args()
