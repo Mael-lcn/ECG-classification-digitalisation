@@ -351,7 +351,7 @@ def run(args):
                     stagnation_counter = 0
 
                     # Sauvegarde disque du model
-                    save_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}.pt")
+                    save_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
                     torch.save(model.state_dict(), save_path)
 
                     # Mise à jour du résumé WandB
@@ -359,7 +359,7 @@ def run(args):
                     wandb.run.summary["best_epoch"] = epoch
 
                     print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_loss:.4f} (Saved)")
-                
+
                 # C.2 Pas d'amélioration
                 else:
                     stagnation_counter += 1
