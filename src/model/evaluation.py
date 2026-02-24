@@ -297,22 +297,24 @@ def load_weights(weights_file):
 
 
 def main():
+    options = ", ".join([f"{i}: {model.__name__}" for i, model in enumerate(model_list)])
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default="../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('--checkpoint', default="checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
+    parser.add_argument('-c', '--checkpoint', default="checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
     parser.add_argument('--class_map', default='../../ressources/final_class.json', help="JSON ordered class list")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     parser.add_argument('-o', '--output', type=str, default="../output/evaluation")
 
-    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--use_static_padding', action='store_true', default=False,
                         help="Force une taille de padding fixe (universelle).")
-    options = ", ".join([f"{i}: {model.__name__}" for i, model in enumerate(model_list)])
+
     parser.add_argument('--model', type=int, default=0,
                         help=f"Quel modèle voulez-vous évaluer: {options}")
 
-    parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
+    parser.add_argument("-w", "--workers", type=int, default=min(8, multiprocessing.cpu_count()-1))
 
     args = parser.parse_args()
 
@@ -342,7 +344,7 @@ def main():
 
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
     checkpoint_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
-    exp_name = f"EVAL_{model_list[args.model].__name__}_{pad_status}_thr{args.threshold}_{checkpoint_name}"
+    exp_name = f"EVAL_{model_list[args.model].__name__}_{pad_status}_thr{args.threshold}_patience:{checkpoint_name}"
 
     wandb.init(
         project="ECG_Classification_Experiments",

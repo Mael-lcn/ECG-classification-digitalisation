@@ -210,7 +210,7 @@ def run(args):
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_{args.patience}"
+    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_patience:{args.patience}"
 
     # 3. Gestion de l'ID WandB (Pour la reprise/resume)
     wandb_id = wandb.util.generate_id()
@@ -422,10 +422,10 @@ def main():
     parser.add_argument('--model', type=int, default=0,
                         help=f"Quel modèle voulez-vous entrainer: {options}")
 
+    # : param use_fcnn
     # :param n_fft: Number of points used in the Fourier Transform (frequency resolution)
     # :param hop_length: Window sliding stride (how much the window slide each step)
     # :param win_length: Window size in samples
-
 
 
     # Hyperparamètres
@@ -439,12 +439,13 @@ def main():
                         help="Désactive l'Automatic Mixed Precision (AMP). Si mis, l'entraînement est en FP32 (plus stable).")
 
     # Arguments Système
-    parser.add_argument('--workers', type=int, default=multiprocessing.cpu_count(),
+    parser.add_argument('--workers', type=int, default=min(8, multiprocessing.cpu_count()-1),
                         help="Nombre de processus pour charger les données")
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")
 
     args = parser.parse_args()
+
 
     # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"

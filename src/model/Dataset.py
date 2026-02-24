@@ -199,7 +199,7 @@ class LargeH5Dataset(Dataset):
             self.file_handle.close()
 
         # 2. Ouverture : Nouveau fichier HDF5
-        self.file_handle = h5py.File(self.h5_paths[file_idx], 'r')
+        self.file_handle = h5py.File(self.h5_paths[file_idx], 'r', swmr=True)
 
         # 3. Chargement du csv
         df = pd.read_csv(self.csv_paths[file_idx])

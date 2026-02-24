@@ -54,24 +54,29 @@ class MegaBatchSortishSampler(Sampler):
 
     def __iter__(self):
         """
-        Générateur principal itérant sur les indices du dataset.
+        Générateur principal itérant sur les indices du dataset de manière optimisée pour HDF5.
 
-        Ce générateur ne renvoie pas un indice unique, mais une liste d'indices constituant un batch complet.
+        STRATÉGIE "CONTIGUOUS SHUFFLE" (I/O Friendly) :
+        Contrairement à un tirage purement aléatoire qui détruit les performances de lecture 
+        du disque avec le format HDF5, cette méthode lit les données par blocs contigus.
+        Puisque le jeu de données a été mélangé (shuffled) hors-ligne avant la création 
+        des fichiers HDF5, chaque bloc contigu est déjà un échantillon statistiquement 
+        représentatif (mix de classes).
 
         Logique d'itération :
-        1. Pour chaque fichier :
-            a. Récupère tous les indices locaux.
-            b. Mélange ces indices (si shuffle=True).
-            c. Crée des "Mega-Chunks".
-            d. Trie chaque chunk par longueur de séquence (descendant).
-            e. Découpe le chunk trié en mini-batchs de taille `batch_size`.
-            f. Yield le mini-batch.
+        1. Ordre des fichiers : Mélange de l'ordre de lecture des fichiers HDF5.
+        2. Blocs Séquentiels : Découpage des indices du fichier en gros blocs ("Mega-Chunks") SÉQUENTIELS.
+        3. Mélange des Blocs : Mélange aléatoire de l'ordre d'apparition de ces Mega-Chunks.
+        4. Tri Anti-Padding : Au sein d'un Mega-Chunk, tri des signaux par longueur décroissante en RAM.
+        5. Mini-Batchs : Découpage du Mega-Chunk trié en mini-batchs de la taille demandée (batch_size).
 
         Yields:
-            list[int]: Une liste d'indices d'échantillons correspondant à un mini-batch.
+            list[int]: Une liste d'indices d'échantillons correspondant à un mini-batch prêt pour le GPU.
         """
         num_files = len(self.dataset.h5_paths)
         file_order = np.arange(num_files)
+
+        # 1. Mélange de l'ordre d'ouverture des fichiers
         if self.shuffle:
             np.random.shuffle(file_order)
 
@@ -81,23 +86,28 @@ class MegaBatchSortishSampler(Sampler):
             start_global = self.boundaries[f_idx]
             end_global = self.boundaries[f_idx + 1]
 
-            # Génération des indices globaux pour ce fichier
+            # Génération des indices globaux pour ce fichier (strictement séquentiels)
             indices_in_file = np.arange(start_global, end_global)
 
-            # 3. Mélange local (Intra-fichier)
-            if self.shuffle:
-                np.random.shuffle(indices_in_file)
-
-            # On découpe les indices du fichier en mega batch
+            # 2. Découpage en Mega-Chunks SÉQUENTIELS (Ex: 0-3199, 3200-6399...)
+            mega_chunks = []
             for i in range(0, len(indices_in_file), self.mega_batch_size):
-                mega_chunk = indices_in_file[i : i + self.mega_batch_size]
+                mega_chunks.append(indices_in_file[i : i + self.mega_batch_size])
 
-                # Tri par longueur descendant pour minimiser le padding dans le batch
+            # 3. Mélange de l'ordre des Mega-Chunks (Stochasticité à l'échelle du bloc)
+            if self.shuffle:
+                np.random.shuffle(mega_chunks)
+
+            # 4. Traitement en RAM de chaque Mega-Chunk
+            for mega_chunk in mega_chunks:
+                # Récupération des longueurs réelles pour optimiser le padding
                 lengths = self.dataset.all_lengths[mega_chunk]
+
+                # Tri par longueur décroissante (les plus longs en premier)
                 argsort = np.argsort(lengths)[::-1]
                 sorted_mega_chunk = mega_chunk[argsort]
 
-                # Découpage final en Mini-Batch
+                # 5. Découpage final en Mini-Batchs pour le DataLoader
                 for j in range(0, len(sorted_mega_chunk), self.batch_size):
                     batch = sorted_mega_chunk[j : j + self.batch_size]
                     yield batch.tolist()

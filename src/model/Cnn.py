@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
 class CNN(nn.Module):
     def __init__(self, num_classes: int = 27, in_channels: int = 12, ch1: int = 32, ch2: int = 64, ch3: int = 128,
                  kernel_size: int = 3, dropout: float = 0.5, use_batchnorm: bool = True, use_fcnn: bool = False, 
@@ -20,7 +21,7 @@ class CNN(nn.Module):
             window_size: Kernel size for the sliding window classifier (only used if use_fcnn=True)
         """
         super().__init__()
-        
+
         self.use_fcnn = use_fcnn
         padding = 0
 
