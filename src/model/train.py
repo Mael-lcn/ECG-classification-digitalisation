@@ -211,8 +211,6 @@ def run(args):
     os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
-    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_patience{args.patience}"
 
     # 3. Gestion de l'ID WandB (Pour la reprise/resume)
     wandb_id = wandb.util.generate_id()
@@ -227,11 +225,16 @@ def run(args):
                 resume_mode = "must"
                 print(f"[WANDB] Reprise du run ID : {wandb_id}")
 
-    # 4. Initialisation WandB
+
+    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
+    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_patience{args.patience}"
+
     wandb.init(
         project="ECG_Classification_Experiments",
+        group=exp_name,
+        job_type="train",
+        name=f"train",
         config=args,
-        name=exp_name,
         id=wandb_id,
         resume=resume_mode,
         tags=["scientific", pad_status, "CNN", "offline"]

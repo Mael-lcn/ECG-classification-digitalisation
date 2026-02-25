@@ -342,15 +342,23 @@ def main():
     os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
-    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    checkpoint_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
-    exp_name = f"EVAL_{model_list[args.model].__name__}_{pad_status}_thr{args.threshold}_patience{checkpoint_name}"
+    checkpoint_basename = os.path.basename(args.checkpoint)
+    # On extrait la partie "EXP_..." avant le numéro d'époque
+    group_id = checkpoint_basename.split('_ep')[0].replace('best_model_', '')
 
+    # 2. INITIALISATION WANDB CLEAN
     wandb.init(
         project="ECG_Classification_Experiments",
-        config=args,
-        name=exp_name,
-        tags=["evaluation", pad_status, "CNN", "offline"]
+        group=group_id,
+        job_type="eval",
+        name=f"test_thr{args.threshold}",
+        config={
+            "eval_threshold": args.threshold,
+            "checkpoint_source": checkpoint_basename,
+            "test_batch_size": args.batch_size,
+            "use_static_padding": args.use_static_padding
+        },
+        tags=["eval", "final_test", "offline"]
     )
 
     # Définition des axes pour des graphiques cohérents
@@ -433,6 +441,7 @@ def main():
     # Upload du checkpoint évalué comme artifact
     print("[WANDB] Upload du checkpoint évalué en cours...")
     artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
+
     if os.path.exists(args.checkpoint):
         artifact.add_file(args.checkpoint)
     wandb.log_artifact(artifact)
