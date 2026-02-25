@@ -22,6 +22,7 @@ from Sampler import MegaBatchSortishSampler
 import torch._dynamo
 
 from Cnn import CNN
+from Cnn_TimeFreq import CNN_TimeFreq
 
 
 
@@ -29,7 +30,7 @@ from Cnn import CNN
 # CONFIGURATION SYSTÈME
 # ==============================================================================
 # Liste des modèles disponibles youhou il y en a trop...
-model_list = [CNN]
+model_list = [CNN, CNN_TimeFreq]
 
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000

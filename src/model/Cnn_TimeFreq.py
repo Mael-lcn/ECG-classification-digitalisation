@@ -49,6 +49,7 @@ class CNN_TimeFreq(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        self.use_fcnn = use_fcnn
         self.global_pool = nn.AdaptiveAvgPool2d(1)
 
         if use_fcnn:
