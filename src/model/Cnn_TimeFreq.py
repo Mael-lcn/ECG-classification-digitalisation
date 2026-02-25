@@ -49,6 +49,7 @@ class CNN_TimeFreq(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        self.use_fcnn = use_fcnn
         self.global_pool = nn.AdaptiveAvgPool2d(1)
 
         if use_fcnn:
@@ -73,9 +74,9 @@ class CNN_TimeFreq(nn.Module):
 
         # Apply spectrogram lead wise
         batch_size, n_leads, n_samples = x.shape
-        x = x.view(batch_size * n_leads, n_samples) # flatten
+        x = x.reshape(batch_size * n_leads, n_samples) # flatten
         x = self.spectrogram(x) # (batch*n_leads, freq, time)
-        x = x.view(batch_size, n_leads, x.shape[-2], x.shape[-1]) # (batch_size, n_leads, freq, time)
+        x = x.reshape(batch_size, n_leads, x.shape[-2], x.shape[-1]) # (batch_size, n_leads, freq, time)
 
         x = F.leaky_relu(self.bn1(self.conv1(x)), 0.01) # non-zero gradient 0.01 for negative inputs
         x = self.pool(x)

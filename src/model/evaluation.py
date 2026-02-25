@@ -208,8 +208,8 @@ def evaluate(model, dataloader, device, threshold):
                 print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
 
-            probs = model(x)
-            #probs = torch.sigmoid(logits) # already applied in the model forward
+            #probs = model(x)
+            probs = torch.sigmoid(model(x))
             binary = (probs >= threshold).int()
 
             all_labels.append(y.cpu())
