@@ -5,6 +5,7 @@ import re
 import time
 import math
 from tqdm import tqdm
+import glob
 
 import multiprocessing
 from functools import partial
@@ -210,7 +211,7 @@ def run(args):
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_patience:{args.patience}"
+    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_patience{args.patience}"
 
     # 3. Gestion de l'ID WandB (Pour la reprise/resume)
     wandb_id = wandb.util.generate_id()
@@ -387,7 +388,17 @@ def run(args):
 
     # Versionning du modèle final
     print("[WANDB] Upload du modèle final en cours...")
-    artifact = wandb.Artifact(f"model-{wandb.run.id}", type='model')
+    files = glob.glob(os.path.join(args.checkpoint_dir, f"best_model*.pt"))
+    if files:
+        model_path = files[0]
+
+        # Créer l'artefact et ajouter le fichier
+        artifact = wandb.Artifact(f"model-{wandb.run.id}", type='model')
+        artifact.add_file(model_path)
+        # Upload
+        wandb.log_artifact(artifact)
+    else:
+        print(f"[WANDB] ERREUR : Aucun modèle trouvé dans {args.checkpoint_dir}")
 
     best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}.pt")
     if os.path.exists(best_model_path):

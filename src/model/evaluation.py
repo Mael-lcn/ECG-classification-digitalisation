@@ -344,7 +344,7 @@ def main():
 
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
     checkpoint_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
-    exp_name = f"EVAL_{model_list[args.model].__name__}_{pad_status}_thr{args.threshold}_patience:{checkpoint_name}"
+    exp_name = f"EVAL_{model_list[args.model].__name__}_{pad_status}_thr{args.threshold}_patience{checkpoint_name}"
 
     wandb.init(
         project="ECG_Classification_Experiments",
