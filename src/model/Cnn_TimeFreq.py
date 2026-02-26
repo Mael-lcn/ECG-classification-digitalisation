@@ -75,7 +75,15 @@ class CNN_TimeFreq(nn.Module):
         # Apply spectrogram lead wise
         batch_size, n_leads, n_samples = x.shape
         x = x.reshape(batch_size * n_leads, n_samples) # flatten
-        x = self.spectrogram(x) # (batch*n_leads, freq, time)
+        x = self.spectrogram(x) # (batch*n_leads, freq, time)  [0, 69055] 
+
+        x = torch.clamp(x, min=1e-10)       # prevent log(0) = -inf
+
+        x = torch.log(x)                     # compress to [-23, 11] 
+        mean = x.mean(dim=(-2, -1), keepdim=True)
+        std = x.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+        x = (x - mean) / std                 # normalize to mean=0, std=1
+
         x = x.reshape(batch_size, n_leads, x.shape[-2], x.shape[-1]) # (batch_size, n_leads, freq, time)
 
         x = F.leaky_relu(self.bn1(self.conv1(x)), 0.01) # non-zero gradient 0.01 for negative inputs
