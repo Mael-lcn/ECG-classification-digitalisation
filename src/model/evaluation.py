@@ -421,7 +421,7 @@ def main():
     wandb.run.summary["checkpoint"]      = args.checkpoint
 
     # Per-class table
-    class_table = wandb.Table(columns=["Class", "F1", "AUROC", "AUPRC"])
+    class_table = wandb.Table(columns=["Class", "F1", "AUROC", "AUPRC", "Sensitivity", "Specificity"])
     for i, cls in enumerate(classes):
         f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else None
         auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else None
