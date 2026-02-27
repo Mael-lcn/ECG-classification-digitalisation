@@ -19,6 +19,7 @@ sys.path.append(os.path.abspath(project_root))
 from Dataset import LargeH5Dataset, ecg_collate_wrapper
 from Sampler import MegaBatchSortishSampler
 from Cnn import CNN
+from Cnn_TimeFreq import CNN_TimeFreq
 
 
 
@@ -28,7 +29,7 @@ torch.set_float32_matmul_precision('high')  # Test d'optimisation
 # CONFIGURATION SYSTÈME
 # ==============================================================================
 # Liste des modèles disponibles
-model_list = [CNN]
+model_list = [CNN, CNN_TimeFreq]
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
 
@@ -306,7 +307,7 @@ def main():
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     parser.add_argument('-o', '--output', type=str, default="../output/evaluation")
 
-    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--use_static_padding', action='store_true', default=False,
                         help="Force une taille de padding fixe (universelle).")
