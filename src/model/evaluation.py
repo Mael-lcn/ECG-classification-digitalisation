@@ -426,7 +426,9 @@ def main():
         f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else None
         auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else None
         auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else None
-        class_table.add_data(cls, f1_val, auroc_val, auprc_val)
+        sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else None
+        spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else None
+        class_table.add_data(cls, f1_val, auroc_val, auprc_val, sens_val, spec_val)
     wandb.log({"eval/per_class_metrics": class_table})
 
     # Finish BEFORE artifact upload
