@@ -335,19 +335,15 @@ def main():
     assert weight_classes == classes, "Class order mismatch with weights.csv"
 
 
-    # ================= CONFIGURATION WANDB ================= 
-
+    # ================= CONFIGURATION WANDB =================
     os.makedirs(args.output, exist_ok=True)
-
     os.environ["WANDB_MODE"] = "offline"
     os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
     checkpoint_basename = os.path.basename(args.checkpoint)
-    # On extrait la partie "EXP_..." avant le numéro d'époque
     group_id = checkpoint_basename.split('_ep')[0].replace('best_model_', '')
 
-    # 2. INITIALISATION WANDB CLEAN
     wandb.init(
         project="ECG_Classification_Experiments",
         group=group_id,
@@ -362,39 +358,28 @@ def main():
         tags=["eval", "final_test", "offline"]
     )
 
-    # Définition des axes pour des graphiques cohérents
-    wandb.define_metric("eval/*")
-
     print(f"Début de l'évaluation : {checkpoint_basename}")
 
-    # Dataset
-    dataset = LargeH5Dataset(args.data, classes_list=class_list,  use_static_padding=False)
-
+    # ================= DATASET & DATALOADER =================
+    dataset = LargeH5Dataset(args.data, classes_list=class_list, use_static_padding=False)
     collate_fn = partial(ecg_collate_wrapper, use_static_padding=args.use_static_padding)
-
-    # Création des Samplers et Loaders
-    train_sampler = MegaBatchSortishSampler(dataset, batch_size=args.batch_size, mega_batch_factor=50, shuffle=True)
-
+    sampler = MegaBatchSortishSampler(dataset, batch_size=args.batch_size, mega_batch_factor=50, shuffle=True)
     loader = DataLoader(
-        dataset, collate_fn=collate_fn, batch_sampler=train_sampler, 
+        dataset, collate_fn=collate_fn, batch_sampler=sampler,
         num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
     )
 
-
-    # Model
+    # ================= MODEL =================
     model = model_list[args.model](num_classes=len(class_list)).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    # Nettoyage des clés '_orig_mod' si modèle compilé
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=False)
-
     model = torch.compile(model)
 
+    # ================= EVALUATION =================
     print('Evaluating model...')
-    # Evaluate
     labels, binary, probs = evaluate(model, loader, device, args.threshold)
 
-    # Metrics
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
     print('- Accuracy...')
@@ -402,15 +387,11 @@ def main():
     print('- F-measure...')
     f1, f1_c = compute_f_measure(labels, binary)
     print('- Challenge metric...')
-    challenge = compute_challenge_metric(
-        # uses the specific "Sinus Rhythm" (NSR) baseline to see if the model is actually learning 
-        # heart pathologies or just guessing the most common class
-        weights, labels, binary, classes, "NSR") # normal ecg
-
+    challenge = compute_challenge_metric(weights, labels, binary, classes, "NSR")
     print('Done.')
 
-    # ================= LOGGING WANDB ================= 
-    # Métriques globales
+    # ================= LOGGING WANDB =================
+    # Global metrics
     metrics = {
         "eval/AUROC":           auroc,
         "eval/AUPRC":           auprc,
@@ -421,7 +402,7 @@ def main():
     }
     wandb.log(metrics)
 
-    # Mise à jour du résumé WandB (visible au premier coup d'oeil sur le dashboard)
+    # Summary (visible at first glance on dashboard)
     wandb.run.summary["AUROC"]           = auroc
     wandb.run.summary["AUPRC"]           = auprc
     wandb.run.summary["Accuracy"]        = acc
@@ -429,31 +410,30 @@ def main():
     wandb.run.summary["Challenge_Score"] = challenge
     wandb.run.summary["checkpoint"]      = args.checkpoint
 
-    # Table des métriques par classe (F1 et AUROC)
+    # Per-class table
     class_table = wandb.Table(columns=["Class", "F1", "AUROC", "AUPRC"])
     for i, cls in enumerate(classes):
         f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else None
         auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else None
         auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else None
         class_table.add_data(cls, f1_val, auroc_val, auprc_val)
-
     wandb.log({"eval/per_class_metrics": class_table})
 
-    # Upload du checkpoint évalué comme artifact
-    print("[WANDB] Upload du checkpoint évalué en cours...")
-    artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
-
-    if os.path.exists(args.checkpoint):
-        artifact.add_file(args.checkpoint)
-    wandb.log_artifact(artifact)
-
+    # Finish BEFORE artifact upload
     wandb.finish()
 
-    # ================= Save CSV ================= 
+    # Artifact upload 
+    try:
+        artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
+        if os.path.exists(args.checkpoint):
+            artifact.add_file(args.checkpoint)
+        wandb.log_artifact(artifact)
+    except Exception as e:
+        print(f"[WARN] Artifact upload skipped: {e}")
 
+    # ================= SAVE CSV =================
     name = os.path.splitext(os.path.basename(args.checkpoint))[0]
 
-    # Overall metrics
     output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -461,7 +441,6 @@ def main():
         writer.writerow([auroc, auprc, acc, f1, challenge])
     print(f"Overall metrics saved to {output_csv}")
 
-    # Per-class metrics
     output_csv_per_class = os.path.join(args.output, f"{name}_metrics_per_class.csv")
     with open(output_csv_per_class, 'w', newline='') as f:
         writer = csv.writer(f)
