@@ -386,6 +386,16 @@ def main():
     acc = compute_accuracy(labels, binary)
     print('- F-measure...')
     f1, f1_c = compute_f_measure(labels, binary)
+
+    A = compute_confusion_matrices(labels, binary)
+    # Per-class sensitivity (recall) and specificity
+    sensitivity = np.zeros(len(classes))
+    specificity = np.zeros(len(classes))
+    for k in range(len(classes)):
+        tp, fp, fn, tn = A[k,1,1], A[k,1,0], A[k,0,1], A[k,0,0]
+        sensitivity[k] = tp / (tp + fn) if (tp + fn) > 0 else float('nan')
+        specificity[k] = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
+
     print('- Challenge metric...')
     challenge = compute_challenge_metric(weights, labels, binary, classes, "NSR")
     print('Done.')
@@ -444,12 +454,14 @@ def main():
     output_csv_per_class = os.path.join(args.output, f"{name}_metrics_per_class.csv")
     with open(output_csv_per_class, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Class', 'F1', 'AUROC', 'AUPRC'])
+        writer.writerow(['Class', 'F1', 'AUROC', 'AUPRC', 'Sensitivity', 'Specificity'])
         for i, cls in enumerate(classes):
             f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else 'nan'
             auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else 'nan'
             auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else 'nan'
-            writer.writerow([cls, f1_val, auroc_val, auprc_val])
+            sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else 'nan'
+            spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else 'nan'
+            writer.writerow([cls, f1_val, auroc_val, auprc_val, sens_val, spec_val])
     print(f"Per-class metrics saved to {output_csv_per_class}")
 
 
