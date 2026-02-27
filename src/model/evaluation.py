@@ -365,7 +365,7 @@ def main():
     # Définition des axes pour des graphiques cohérents
     wandb.define_metric("eval/*")
 
-    print(f"Début de l'évaluation : {exp_name}")
+    print(f"Début de l'évaluation : {checkpoint_basename}")
 
     # Dataset
     dataset = LargeH5Dataset(args.data, classes_list=class_list,  use_static_padding=False)
