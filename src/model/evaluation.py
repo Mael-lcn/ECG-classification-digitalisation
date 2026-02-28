@@ -18,18 +18,11 @@ sys.path.append(os.path.abspath(project_root))
 
 from Dataset import LargeH5Dataset, ecg_collate_wrapper
 from Sampler import MegaBatchSortishSampler
-from Cnn import CNN
-from Cnn_TimeFreq import CNN_TimeFreq
+from model_factory import get_shared_parser, build_model
 
 
 
-torch.set_float32_matmul_precision('high')  # Test d'optimisation
-
-# ==============================================================================
-# CONFIGURATION SYSTÈME
-# ==============================================================================
-# Liste des modèles disponibles
-model_list = [CNN, CNN_TimeFreq]
+#torch.set_float32_matmul_precision('high')  # Test d'optimisation
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
 
@@ -298,24 +291,20 @@ def load_weights(weights_file):
 
 
 def main():
-    options = ", ".join([f"{i}: {model.__name__}" for i, model in enumerate(model_list)])
+        # On récupère le parser de base
+    shared_parser = get_shared_parser()
 
-    parser = argparse.ArgumentParser()
+    # On crée le parser de train en héritant du shared_parser
+    parser = argparse.ArgumentParser(
+        description="Script de test", 
+        parents=[shared_parser]
+    )
+
     parser.add_argument('--data', default="../output/final_data/test", help="HDF5 test dataset directory")
     parser.add_argument('-c', '--checkpoint', default="checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
-    parser.add_argument('--class_map', default='../../ressources/final_class.json', help="JSON ordered class list")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
-    parser.add_argument('-o', '--output', type=str, default="../output/evaluation")
 
-    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--threshold', type=float, default=0.5)
-    parser.add_argument('--use_static_padding', action='store_true', default=False,
-                        help="Force une taille de padding fixe (universelle).")
-
-    parser.add_argument('--model', type=int, default=0,
-                        help=f"Quel modèle voulez-vous évaluer: {options}")
-
-    parser.add_argument("-w", "--workers", type=int, default=min(8, multiprocessing.cpu_count()-1))
 
     args = parser.parse_args()
 
@@ -338,24 +327,31 @@ def main():
     # ================= CONFIGURATION WANDB =================
     os.makedirs(args.output, exist_ok=True)
     os.environ["WANDB_MODE"] = "offline"
-    os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
+    # On prend le dossier parent de output
+    parent_output_dir = os.path.dirname(os.path.normpath(args.output))
+    # On crée le dossier wandb_logs dans ce dossier parent
+    os.environ["WANDB_DIR"] = os.path.join(parent_output_dir, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
+    # Extraction du nom de fichier depuis le chemin complet
     checkpoint_basename = os.path.basename(args.checkpoint)
+
+    # Retrouver le nom de l'expérience
     group_id = checkpoint_basename.split('_ep')[0].replace('best_model_', '')
 
     wandb.init(
         project="ECG_Classification_Experiments",
         group=group_id,
         job_type="eval",
-        name=f"test_thr{args.threshold}",
+        name=f"test_{args.model_name}_thr{args.threshold}",
         config={
             "eval_threshold": args.threshold,
             "checkpoint_source": checkpoint_basename,
             "test_batch_size": args.batch_size,
-            "use_static_padding": args.use_static_padding
+            "use_static_padding": args.use_static_padding,
+            "model_tested": args.model_name
         },
-        tags=["eval", "final_test", "offline"]
+        tags=["eval", "final_test", args.model_name, "offline"]
     )
 
     print(f"Début de l'évaluation : {checkpoint_basename}")
@@ -370,7 +366,7 @@ def main():
     )
 
     # ================= MODEL =================
-    model = model_list[args.model](num_classes=len(class_list)).to(device)
+    model = build_model(args).to(device).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=False)

@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -7,7 +6,7 @@ import torch.nn.functional as F
 class CNN(nn.Module):
     def __init__(self, num_classes: int = 27, in_channels: int = 12, ch1: int = 32, ch2: int = 64, ch3: int = 128,
                  kernel_size: int = 3, dropout: float = 0.5, use_batchnorm: bool = True, use_fcnn: bool = False, 
-                 window_size: int = 4000, **kwargs):
+                 window_size1D: int = 4000, **kwargs):
         """
         Combined CNN architecture for ECG classification with FCNN flag
         
@@ -51,7 +50,7 @@ class CNN(nn.Module):
             self.classifier = nn.Conv1d(
                 in_channels=ch3,
                 out_channels=num_classes,
-                kernel_size=window_size,
+                kernel_size=window_size1D,
                 stride=1,
                 padding=0
             )

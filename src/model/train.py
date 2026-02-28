@@ -1,4 +1,4 @@
-import os
+import os, sys
 import json
 import argparse
 import re
@@ -7,31 +7,26 @@ import math
 from tqdm import tqdm
 import glob
 
-import multiprocessing
 from functools import partial
 
 import wandb
 
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+import torch._dynamo
 from torch.utils.data import DataLoader
+
+
+project_root = os.path.join(os.path.dirname(__file__), '../..')
+sys.path.append(os.path.abspath(project_root))
+
 from Dataset import LargeH5Dataset, ecg_collate_wrapper
 from Sampler import MegaBatchSortishSampler
-import torch._dynamo
-
-from Cnn import CNN
-from Cnn_TimeFreq import CNN_TimeFreq
+from model_factory import get_shared_parser, build_model
 
 
 
-# ==============================================================================
-# CONFIGURATION SYSTÈME
-# ==============================================================================
-# Liste des modèles disponibles youhou il y en a trop...
-model_list = [CNN, CNN_TimeFreq]
 
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
@@ -227,17 +222,45 @@ def run(args):
 
 
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    exp_name = f"EXP_{model_list[args.model].__name__}_AMP{use_amp}_bs{args.batch_size}_lr{args.lr}_{pad_status}_patience{args.patience}"
+    arch_type = "FCNN" if args.use_fcnn else "CNN"
 
+    # Construction dynamique des composants du nom
+    exp_parts = [
+        args.model_name,                     # cnn_base ou cnn_spectro
+        arch_type,                           # CNN ou FCNN
+        f"ch{args.ch1}-{args.ch2}-{args.ch3}", # Capacité du réseau (ex: ch32-64-128)
+        f"lr{args.lr}",                      # Learning rate
+        f"bs{args.batch_size}",              # Batch size
+        pad_status                           # Padding
+    ]
+
+    # Ajout des paramètres spécifiques au modèle pour éviter les confusions
+    if args.model_name == "cnn_base" and args.use_fcnn:
+        exp_parts.append(f"w1D{args.window_size1D}")
+
+    elif args.model_name == "cnn_spectro":
+        exp_parts.append(f"fft{args.n_fft}")
+        if args.use_fcnn:
+            # Transforme la liste [4, 4] en "4x4" pour la lisibilité
+            w2d_str = "x".join(map(str, args.window_size2D))
+            exp_parts.append(f"w2D{w2d_str}")
+
+    # Ajout de l'ID WandB 
+    exp_parts.append(wandb_id[:6])
+
+    # Assemblage final
+    exp_name = "_".join(exp_parts)
+
+    # 5. Initialisation WandB
     wandb.init(
         project="ECG_Classification_Experiments",
-        group=exp_name,
+        group=exp_name,        # Le groupe reflète la configuration exacte
         job_type="train",
-        name=f"train",
+        name=f"run_{wandb_id[:6]}", # Le nom du run est unique
         config=args,
         id=wandb_id,
         resume=resume_mode,
-        tags=["scientific", pad_status, "CNN", "offline"]
+        tags=["scientific", pad_status, arch_type, args.model_name, "offline"]
     )
 
     # Sauvegarde de l'ID pour une future reprise
@@ -254,7 +277,6 @@ def run(args):
     # 5. Chargement des Données
     print(f"[INIT] Chargement des classes...")
     with open(args.class_map, 'r') as f: loaded_classes = json.load(f)
-    num_classes = len(loaded_classes)
 
     # Création des Datasets
     train_ds = LargeH5Dataset(input_dir=args.train_data, classes_list=loaded_classes, use_static_padding=args.use_static_padding)
@@ -263,8 +285,8 @@ def run(args):
     collate_fn = partial(ecg_collate_wrapper, use_static_padding=args.use_static_padding)
 
     # Création des Samplers et Loaders
-    train_sampler = MegaBatchSortishSampler(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_sampler = MegaBatchSortishSampler(val_ds, batch_size=args.batch_size, shuffle=False)
+    train_sampler = MegaBatchSortishSampler(train_ds, mega_batch_factor=args.mega_batch_factor, batch_size=args.batch_size, shuffle=True)
+    val_sampler = MegaBatchSortishSampler(val_ds, mega_batch_factor=args.mega_batch_factor, batch_size=args.batch_size, shuffle=False)
 
     train_loader = DataLoader(
         train_ds, collate_fn=collate_fn, batch_sampler=train_sampler, 
@@ -276,7 +298,7 @@ def run(args):
     )
 
     # 6. Création du Modèle
-    model = model_list[args.model](num_classes=num_classes).to(device)
+    model = build_model(args).to(device)
 
     # Log les gradients et poids tous les 500 batchs pour diagnostic mais casse torch.compile !!!!
     # wandb.watch(model, log="all", log_freq=500)
@@ -420,47 +442,33 @@ def main():
     """
     Point d'entrée du script. Gestion des arguments CLI.
     """
-    options = ", ".join([f"{i}: {model}" for i, model in enumerate(model_list)])
-    parser = argparse.ArgumentParser(description="Script d'entraînement ECG Scientifique")
+    # On récupère le parser de base
+    shared_parser = get_shared_parser()
+
+    # On crée le parser de train en héritant du shared_parser
+    parser = argparse.ArgumentParser(
+        description="Script d'entraînement", 
+        parents=[shared_parser]
+    )
 
     # Arguments Dossiers & Fichiers
     parser.add_argument('--train_data', type=str, default="../output/final_data/train", 
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
-    parser.add_argument('--class_map', type=str, default='../../ressources/final_class.json',
-                        help="Chemin JSON mappant les indices aux noms de classes")
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help="Dossier où sauvegarder les poids (.pt)")
-    parser.add_argument('--output', type=str, default='../output/',
-                        help="Dossier de sortie standard")
-    parser.add_argument('--model', type=int, default=0,
-                        help=f"Quel modèle voulez-vous entrainer: {options}")
-
-    # : param use_fcnn
-    # :param n_fft: Number of points used in the Fourier Transform (frequency resolution)
-    # :param hop_length: Window sliding stride (how much the window slide each step)
-    # :param win_length: Window size in samples
-
 
     # Hyperparamètres
-    parser.add_argument('--batch_size', type=int, default=64, help="Taille du batch")
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
-    parser.add_argument('--use_static_padding', action='store_true', default=False,
-                        help="Force une taille de padding fixe (universelle).")
-    parser.add_argument('--not_use_amp', action='store_false', default=True,
-                        help="Désactive l'Automatic Mixed Precision (AMP). Si mis, l'entraînement est en FP32 (plus stable).")
 
     # Arguments Système
-    parser.add_argument('--workers', type=int, default=min(8, multiprocessing.cpu_count()-1),
-                        help="Nombre de processus pour charger les données")
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")
 
     args = parser.parse_args()
-
 
     # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"

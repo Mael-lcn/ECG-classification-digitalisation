@@ -4,12 +4,13 @@ import torch.nn.functional as F
 import torchaudio
 
 
+
 class CNN_TimeFreq(nn.Module):
     def __init__(self, num_classes=27, in_channels=12, n_fft=128, hop_length=64,
             win_length=128, ch1=32, ch2=64, ch3=128, dropout=0.5, use_batchnorm=True, use_fcnn=False,
-            window_size=(4, 4), **kwargs): 
+            window_size2D=(4, 4), **kwargs): 
         """
-        Integrated a time–frequency transformation (STFT spectrogram) using torchaudiow with a 2D convolutional network.
+        Integrated a time-frequency transformation (STFT spectrogram) using torchaudiow with a 2D convolutional network.
         
         :param num_classes: Number of output classes (default 27)
         :param in_channels: Number of ECG leads (default 12)
@@ -19,7 +20,6 @@ class CNN_TimeFreq(nn.Module):
         :param window_size: Kernel size for the 2D sliding window classifier (freq, time) 
                             Only used if use_fcnn=True
         """
-        
         super().__init__()
 
         # Spectrogram module
@@ -56,7 +56,7 @@ class CNN_TimeFreq(nn.Module):
             self.classifier = nn.Conv2d(
                 in_channels=ch3,
                 out_channels=num_classes,
-                kernel_size=window_size,
+                kernel_size=window_size2D,
                 stride=1,
                 padding=0
             )
