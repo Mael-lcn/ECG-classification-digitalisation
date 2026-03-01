@@ -66,27 +66,22 @@ class MegaBatchIterableDataset(IterableDataset):
 
         assert len(self.h5_paths) == len(self.csv_paths), "Erreur pas autant de csv que de h5"
 
-    def __iter__(self):
+def __iter__(self):
         """
-        Générateur principal produisant les mini-batchs.
-        Gère automatiquement la répartition des fichiers si plusieurs workers (num_workers > 0) sont utilisés.
+        Générateur SOTA : Lecture contiguë segmentée, Tri virtuel et Zero-Copy.
+        Optimisé pour le débit GPU et la sobriété RAM.
         """
         worker_info = get_worker_info()
         num_files = len(self.h5_paths)
 
-        # Répartition des fichiers entre les workers pour le multi-processing
+        # 1. Distribution équitable des fichiers par Worker
         if worker_info is None:
-            # Mode mono-processus (num_workers=0) : ce worker traite tous les fichiers
             file_indices = list(range(num_files))
         else:
-            # Mode multi-processus : on divise les fichiers équitablement entre les workers
             per_worker = int(math.ceil(num_files / float(worker_info.num_workers)))
             worker_id = worker_info.id
-            start_idx = worker_id * per_worker
-            end_idx = min(start_idx + per_worker, num_files)
-            file_indices = list(range(start_idx, end_idx))
+            file_indices = list(range(worker_id * per_worker, min((worker_id + 1) * per_worker, num_files)))
 
-        # Mélange de l'ordre de lecture des fichiers si demandé
         if self.shuffle:
             np.random.shuffle(file_indices)
 
@@ -94,70 +89,74 @@ class MegaBatchIterableDataset(IterableDataset):
             h5_path = self.h5_paths[f_idx]
             csv_path = self.csv_paths[f_idx]
 
-            # 1. Chargement et préparation des métadonnées (CSV) en RAM
+            # Chargement des métadonnées (Léger en RAM)
             df = pd.read_csv(csv_path)
-
-            # Alignement des colonnes de classes et conversion en matrice numpy
-            df_labels = df.reindex(columns=self.classes, fill_value=0).fillna(0.0)
-            labels_matrix = df_labels.astype(np.float32).values
-
-            # Extraction des informations de positionnement temporelles
+            labels_matrix = df.reindex(columns=self.classes, fill_value=0).astype(np.float32).values
             starts = df['start_offset'].values
             lengths = df['length'].values
-            total_samples_in_file = len(df)
+            total_samples = len(df)
 
-            # 2. Découpage logique du fichier en blocs contigus (Mega-Chunks)
-            mega_chunk_starts = list(range(0, total_samples_in_file, self.mega_batch_size))
+            # 2. Mega-Pool Virtuelle (Tri global pour optimiser le padding GPU)
+            # On définit un pool d'indices sans charger les signaux.
+            mega_pool_starts = list(range(0, total_samples, self.mega_batch_size))
             if self.shuffle:
-                np.random.shuffle(mega_chunk_starts)
+                np.random.shuffle(mega_pool_starts)
 
-            # 3. Ouverture du fichier HDF5 et itération sur les Mega-Chunks
             with h5py.File(h5_path, 'r') as h5_file:
-                for mc_start in mega_chunk_starts:
-                    mc_end = min(mc_start + self.mega_batch_size, total_samples_in_file)
- 
-                    # 1. On charge juste les métadonnées pour planifier le travail
-                    mc_labels = labels_matrix[mc_start:mc_end]
-                    mc_starts = starts[mc_start:mc_end]
-                    mc_lengths = lengths[mc_start:mc_end]
+                for mp_start in mega_pool_starts:
+                    mp_end = min(mp_start + self.mega_batch_size, total_samples)
+                    
+                    # Tri par longueur décroissante au sein du pool (Virtuel)
+                    pool_lengths = lengths[mp_start:mp_end]
+                    mc_argsort = np.argsort(pool_lengths)[::-1]
 
-                    # Tri local pour le padding dynamique GPU
-                    argsort = np.argsort(mc_lengths)[::-1]
+                    # 3. Lecture Physique par Tranches (Segmented Contiguous Reading)
+                    # On définit Y = 4 : on traite 4 batchs à la fois pour lisser l'I/O
+                    y_factor = 4 
+                    ram_chunk_size = self.batch_size * y_factor
 
-                    # 2. Lecture séquentielle massive sur le disque (Pic de RAM ~2.8 Go par worker)
-                    raw_tracings_np = h5_file['tracings'][mc_start:mc_end]
+                    for k in range(0, len(mc_argsort), ram_chunk_size):
+                        indices_in_pool = mc_argsort[k : k + ram_chunk_size]
+                        real_indices = mp_start + indices_in_pool
 
-                    # On convertit tout le bloc en Tenseur PyTorch d'un coup
-                    raw_tracings_pt = torch.from_numpy(raw_tracings_np)
-                    mc_labels_pt = torch.from_numpy(mc_labels) # Idem pour les labels
+                        # --- STRATÉGIE "BOUNDING BOX" DISQUE ---
+                        # On trouve la plage minimale/maximale pour une lecture contiguë
+                        idx_min, idx_max = np.min(real_indices), np.max(real_indices)
+                        
+                        # Lecture d'un bloc physique unique (Vitesse maximale du disque)
+                        raw_block_np = h5_file['tracings'][idx_min : idx_max + 1]
+                        
+                        # Zero-copy : On enveloppe la mémoire NumPy dans PyTorch
+                        raw_block_pt = torch.from_numpy(raw_block_np)
 
-                    # 3. On consomme et on yield à la volée
-                    for j in range(0, len(argsort), self.batch_size):
-                        batch_indices = argsort[j : j + self.batch_size]
-                        current_batch_size = len(batch_indices)
+                        # --- 4. ASSEMBLAGE ET YIELD À LA VOLÉE ---
+                        for j in range(0, len(indices_in_pool), self.batch_size):
+                            batch_idx_in_chunk = slice(j, j + self.batch_size)
+                            cur_indices = real_indices[batch_idx_in_chunk]
+                            cur_bs = len(cur_indices)
 
-                        if self.use_static_padding:
-                            target_t = MAX_SIGNAL_LENGTH
-                        else:
-                            target_t = mc_lengths[batch_indices[0]]
+                            # Padding dynamique basé sur le signal le plus long du mini-batch
+                            target_t = MAX_SIGNAL_LENGTH if self.use_static_padding else lengths[cur_indices[0]]
 
-                        # Pré-allocation du seul tenseur qui sera envoyé au GPU
-                        batch_signals = torch.zeros((current_batch_size, 12, target_t), dtype=torch.float32)
-                        batch_labels = torch.zeros((current_batch_size, self.num_classes), dtype=torch.float32)
-                        batch_lengths = torch.zeros(current_batch_size, dtype=torch.long)
- 
-                        for i, idx in enumerate(batch_indices):
-                            s_start = mc_starts[idx]
-                            s_len = mc_lengths[idx]
-                            read_len = min(s_len, target_t)
+                            # Pré-allocation (Le seul nouvel espace mémoire créé)
+                            batch_signals = torch.zeros((cur_bs, 12, target_t), dtype=torch.float32)
+                            batch_labels = torch.from_numpy(labels_matrix[cur_indices])
+                            batch_lens = torch.from_numpy(lengths[cur_indices]).long()
 
-                            batch_signals[i, :, :read_len] = raw_tracings_pt[idx, :, s_start : s_start + read_len]
-                            batch_labels[i] = mc_labels_pt[idx]
-                            batch_lengths[i] = read_len
+                            # Remplissage par slicing mémoire (très rapide)
+                            for i in range(cur_bs):
+                                idx = cur_indices[i]
+                                s_start = starts[idx]
+                                s_len = lengths[idx]
+                                read_len = min(s_len, target_t)
 
-                        # Yield: On balance le batch au GPU et on l'oublie
-                        yield batch_signals, batch_labels, batch_lengths
+                                # On calcule la position relative dans le bloc lu
+                                rel_idx = idx - idx_min
+                                batch_signals[i, :, :read_len] = raw_block_pt[rel_idx, :, s_start : s_start + read_len]
 
-                    # 4. Fin du Mega-Chunk : On détruit manuellement le gros bloc de 2.8 Go
-                    del raw_tracings_pt
-                    del raw_tracings_np
+                            # Envoi direct au GPU via le DataLoader
+                            yield batch_signals, batch_labels, batch_lens
+
+                        # --- 5. NETTOYAGE CHIRURGICAL ---
+                        # On force la libération du bloc avant de charger le suivant
+                        del raw_block_np, raw_block_pt

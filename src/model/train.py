@@ -326,7 +326,8 @@ def run(args):
 
     # Compilation PyTorch 2.0
     try:
-        model = torch.compile(model, dynamic=True)
+        if args.use_static_padding:
+            model = torch.compile(model)
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
 
