@@ -116,50 +116,48 @@ class MegaBatchIterableDataset(IterableDataset):
                 for mc_start in mega_chunk_starts:
                     mc_end = min(mc_start + self.mega_batch_size, total_samples_in_file)
  
-                    # Lecture disque optimisée : un seul appel I/O pour charger tout le bloc en RAM
-                    # La matrice brute contient encore le padding statique du HDF5 à ce stade
-                    raw_tracings = h5_file['tracings'][mc_start:mc_end]
-
-                    # Récupération des métadonnées locales à ce bloc spécifique
+                    # 1. On charge juste les métadonnées pour planifier le travail
                     mc_labels = labels_matrix[mc_start:mc_end]
                     mc_starts = starts[mc_start:mc_end]
                     mc_lengths = lengths[mc_start:mc_end]
 
-                    # 4. Tri local en RAM pour minimiser le padding futur
-                    # On trie les indices selon la longueur utile réelle, par ordre décroissant
+                    # Tri local pour le padding dynamique GPU
                     argsort = np.argsort(mc_lengths)[::-1]
 
-                    # 5. Découpage final et assemblage des mini-batchs pour le GPU
+                    # 2. Lecture séquentielle massive sur le disque (Pic de RAM ~2.8 Go par worker)
+                    raw_tracings_np = h5_file['tracings'][mc_start:mc_end]
+
+                    # On convertit tout le bloc en Tenseur PyTorch d'un coup
+                    raw_tracings_pt = torch.from_numpy(raw_tracings_np)
+                    mc_labels_pt = torch.from_numpy(mc_labels) # Idem pour les labels
+
+                    # 3. On consomme et on yield à la volée
                     for j in range(0, len(argsort), self.batch_size):
                         batch_indices = argsort[j : j + self.batch_size]
                         current_batch_size = len(batch_indices)
 
                         if self.use_static_padding:
-                            # Mode Statique : Longueur universelle fixe
                             target_t = MAX_SIGNAL_LENGTH
                         else:
-                            # Optimisation du padding : le premier signal est le plus long du mini-batch
-                            # Cela définit la taille temporelle exacte nécessaire, sans padding mort
                             target_t = mc_lengths[batch_indices[0]]
 
-                        # Pré-allocation de tenseurs à la taille parfaitement ajustée
+                        # Pré-allocation du seul tenseur qui sera envoyé au GPU
                         batch_signals = torch.zeros((current_batch_size, 12, target_t), dtype=torch.float32)
                         batch_labels = torch.zeros((current_batch_size, self.num_classes), dtype=torch.float32)
                         batch_lengths = torch.zeros(current_batch_size, dtype=torch.long)
  
-                        # Remplissage du tenseur en filtrant le padding d'origine du HDF5
                         for i, idx in enumerate(batch_indices):
                             s_start = mc_starts[idx]
                             s_len = mc_lengths[idx]
-                            # Sécurité : on ne lit pas plus que target_t
                             read_len = min(s_len, target_t)
 
-                            # Extraction de la portion utile et insertion dans le tenseur PyTorch
-                            utile_signal = raw_tracings[idx, :, s_start : s_start + read_len]
-                            batch_signals[i, :, :read_len] = torch.from_numpy(utile_signal)
-
-                            # Assignation du label
-                            batch_labels[i] = torch.from_numpy(mc_labels[idx])
+                            batch_signals[i, :, :read_len] = raw_tracings_pt[idx, :, s_start : s_start + read_len]
+                            batch_labels[i] = mc_labels_pt[idx]
                             batch_lengths[i] = read_len
 
+                        # Yield: On balance le batch au GPU et on l'oublie
                         yield batch_signals, batch_labels, batch_lengths
+
+                    # 4. Fin du Mega-Chunk : On détruit manuellement le gros bloc de 2.8 Go
+                    del raw_tracings_pt
+                    del raw_tracings_np

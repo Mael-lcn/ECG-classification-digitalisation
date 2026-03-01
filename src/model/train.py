@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from Dataset import MegaBatchIterableDataset
+from MegaBatchIterableDataset import MegaBatchIterableDataset
 from model_factory import get_shared_parser, build_model
 
 
