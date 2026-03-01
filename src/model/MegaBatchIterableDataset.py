@@ -66,7 +66,7 @@ class MegaBatchIterableDataset(IterableDataset):
 
         assert len(self.h5_paths) == len(self.csv_paths), "Erreur pas autant de csv que de h5"
 
-def __iter__(self):
+    def __iter__(self):
         """
         Générateur SOTA : Lecture contiguë segmentée, Tri virtuel et Zero-Copy.
         Optimisé pour le débit GPU et la sobriété RAM.
@@ -97,7 +97,7 @@ def __iter__(self):
             total_samples = len(df)
 
             # 2. Mega-Pool Virtuelle (Tri global pour optimiser le padding GPU)
-            # On définit un pool d'indices sans charger les signaux.
+            # On définit un pool d'indices sans charger les signaux
             mega_pool_starts = list(range(0, total_samples, self.mega_batch_size))
             if self.shuffle:
                 np.random.shuffle(mega_pool_starts)
@@ -105,12 +105,12 @@ def __iter__(self):
             with h5py.File(h5_path, 'r') as h5_file:
                 for mp_start in mega_pool_starts:
                     mp_end = min(mp_start + self.mega_batch_size, total_samples)
-                    
+
                     # Tri par longueur décroissante au sein du pool (Virtuel)
                     pool_lengths = lengths[mp_start:mp_end]
                     mc_argsort = np.argsort(pool_lengths)[::-1]
 
-                    # 3. Lecture Physique par Tranches (Segmented Contiguous Reading)
+                    # 3. Lecture Physique par Tranches
                     # On définit Y = 4 : on traite 4 batchs à la fois pour lisser l'I/O
                     y_factor = 4 
                     ram_chunk_size = self.batch_size * y_factor
@@ -119,13 +119,12 @@ def __iter__(self):
                         indices_in_pool = mc_argsort[k : k + ram_chunk_size]
                         real_indices = mp_start + indices_in_pool
 
-                        # --- STRATÉGIE "BOUNDING BOX" DISQUE ---
                         # On trouve la plage minimale/maximale pour une lecture contiguë
                         idx_min, idx_max = np.min(real_indices), np.max(real_indices)
-                        
+
                         # Lecture d'un bloc physique unique (Vitesse maximale du disque)
                         raw_block_np = h5_file['tracings'][idx_min : idx_max + 1]
-                        
+
                         # Zero-copy : On enveloppe la mémoire NumPy dans PyTorch
                         raw_block_pt = torch.from_numpy(raw_block_np)
 
@@ -138,12 +137,12 @@ def __iter__(self):
                             # Padding dynamique basé sur le signal le plus long du mini-batch
                             target_t = MAX_SIGNAL_LENGTH if self.use_static_padding else lengths[cur_indices[0]]
 
-                            # Pré-allocation (Le seul nouvel espace mémoire créé)
+                            # Pré-allocation
                             batch_signals = torch.zeros((cur_bs, 12, target_t), dtype=torch.float32)
                             batch_labels = torch.from_numpy(labels_matrix[cur_indices])
                             batch_lens = torch.from_numpy(lengths[cur_indices]).long()
 
-                            # Remplissage par slicing mémoire (très rapide)
+                            # Remplissage par slicing mémoire
                             for i in range(cur_bs):
                                 idx = cur_indices[i]
                                 s_start = starts[idx]
@@ -157,6 +156,5 @@ def __iter__(self):
                             # Envoi direct au GPU via le DataLoader
                             yield batch_signals, batch_labels, batch_lens
 
-                        # --- 5. NETTOYAGE CHIRURGICAL ---
                         # On force la libération du bloc avant de charger le suivant
                         del raw_block_np, raw_block_pt
