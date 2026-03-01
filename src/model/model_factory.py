@@ -24,7 +24,7 @@ def get_shared_parser():
                            help="Dossier de sortie standard")
     group_sys.add_argument('--class_map', type=str, default='../../ressources/final_class.json',
                            help="Chemin JSON mappant les indices aux noms de classes")    
-    group_sys.add_argument('--workers', type=int, default=min(8, multiprocessing.cpu_count()-1),
+    group_sys.add_argument('--workers', type=int, default=min(10, multiprocessing.cpu_count()-1),
                            help="Nombre de processus pour charger les données")
 
     # --- 2. Choix du modèle ---
@@ -64,7 +64,7 @@ def get_shared_parser():
     # --- 6. Paramètres du dataloading communs ---
     group_train = parser.add_argument_group("Hyperparamètres Communs du Dataloader/Inférence")
     group_train.add_argument('--batch_size', type=int, default=64, help="Taille du batch")
-    group_train.add_argument('--mega_batch_factor', type=int, default=32,
+    group_train.add_argument('--mega_batch_factor', type=int, default=16,
                              help="Granularité du tri. Haut = padding optimisé, Bas = + d'aléatoire")
     group_train.add_argument('--use_static_padding', action='store_true', default=False,
                              help="Force une taille de padding fixe (universelle)")
@@ -88,4 +88,5 @@ def build_model(args_namespace):
     sig = inspect.signature(ModelClass.__init__)
     valid_kwargs = {k: v for k, v in args_dict.items() if k in sig.parameters}
 
+    print(f"Le modèle: {model_name} à bien été instancié")
     return ModelClass(**valid_kwargs)

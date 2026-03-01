@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-import MegaBatchIterableDataset
+from Dataset import MegaBatchIterableDataset
 from model_factory import get_shared_parser, build_model
 
 
@@ -277,10 +277,10 @@ def run(args):
 
     # Création des Datasets
     print(f"[INIT] Préparation des MegaBatchIterableDatasets...")
-    
+
     # Création du Dataset d'entraînement
     train_ds = MegaBatchIterableDataset(
-        data_path=args.train_data, 
+        data_path=args.train_data,
         classes_list=loaded_classes,
         batch_size=args.batch_size,
         mega_batch_factor=args.mega_batch_factor,
@@ -304,7 +304,7 @@ def run(args):
         train_ds, 
         batch_size=None, 
         num_workers=args.workers, 
-        pin_memory=True, 
+        pin_memory=args.use_static_padding, 
         persistent_workers=(args.workers > 0), 
         prefetch_factor=2
     )
@@ -313,7 +313,7 @@ def run(args):
         val_ds, 
         batch_size=None, 
         num_workers=args.workers, 
-        pin_memory=True, 
+        pin_memory=args.use_static_padding, 
         persistent_workers=(args.workers > 0), 
         prefetch_factor=2
     )
@@ -473,9 +473,9 @@ def main():
     )
 
     # Arguments Dossiers & Fichiers
-    parser.add_argument('--train_data', type=str, default="../output/final_data/train", 
+    parser.add_argument('--train_data', type=str, default="../../../output/final_data/train", 
                         help="Dossier contenant les fichiers H5 de train")
-    parser.add_argument('--val_data', type=str, default="../output/final_data/val", 
+    parser.add_argument('--val_data', type=str, default="../../../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help="Dossier où sauvegarder les poids (.pt)")

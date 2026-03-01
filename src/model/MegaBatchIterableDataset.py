@@ -35,11 +35,11 @@ class MegaBatchIterableDataset(IterableDataset):
         classes_list (list[str]): Liste ordonnée des classes pour la création des vecteurs de labels.
         batch_size (int, optional): Taille du mini-batch final envoyé au modèle. Défaut: 64.
         mega_batch_factor (int, optional): Multiplicateur pour définir la taille du bloc lu en une fois 
-            sur le disque (Mega-Chunk = batch_size * mega_batch_factor). Défaut: 32.
+            sur le disque (Mega-Chunk = batch_size * mega_batch_factor). Défaut: 16.
         shuffle (bool, optional): Si True, mélange l'ordre des fichiers et l'ordre des Mega-Chunks. Défaut: True.
     """
 
-    def __init__(self, data_path, classes_list, batch_size=64, mega_batch_factor=32, shuffle=True, use_static_padding=False):
+    def __init__(self, data_path, classes_list, batch_size=64, mega_batch_factor=16, shuffle=True, use_static_padding=False):
         super().__init__()
 
         self.data_path = data_path
@@ -112,7 +112,7 @@ class MegaBatchIterableDataset(IterableDataset):
                 np.random.shuffle(mega_chunk_starts)
 
             # 3. Ouverture du fichier HDF5 et itération sur les Mega-Chunks
-            with h5py.File(h5_path, 'r', swmr=True) as h5_file:
+            with h5py.File(h5_path, 'r') as h5_file:
                 for mc_start in mega_chunk_starts:
                     mc_end = min(mc_start + self.mega_batch_size, total_samples_in_file)
  
@@ -138,14 +138,15 @@ class MegaBatchIterableDataset(IterableDataset):
                             # Mode Statique : Longueur universelle fixe
                             target_t = MAX_SIGNAL_LENGTH
                         else:
-                             # Optimisation du padding : le premier signal est le plus long du mini-batch
+                            # Optimisation du padding : le premier signal est le plus long du mini-batch
                             # Cela définit la taille temporelle exacte nécessaire, sans padding mort
                             target_t = mc_lengths[batch_indices[0]]
 
                         # Pré-allocation de tenseurs à la taille parfaitement ajustée
                         batch_signals = torch.zeros((current_batch_size, 12, target_t), dtype=torch.float32)
                         batch_labels = torch.zeros((current_batch_size, self.num_classes), dtype=torch.float32)
-
+                        batch_lengths = torch.zeros(current_batch_size, dtype=torch.long)
+ 
                         # Remplissage du tenseur en filtrant le padding d'origine du HDF5
                         for i, idx in enumerate(batch_indices):
                             s_start = mc_starts[idx]
@@ -159,5 +160,6 @@ class MegaBatchIterableDataset(IterableDataset):
 
                             # Assignation du label
                             batch_labels[i] = torch.from_numpy(mc_labels[idx])
+                            batch_lengths[i] = read_len
 
-                        yield batch_signals, batch_labels
+                        yield batch_signals, batch_labels, batch_lengths
