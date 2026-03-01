@@ -301,7 +301,7 @@ def main():
     )
 
     parser.add_argument('--data', default="../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('-c', '--checkpoint', default="checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
+    parser.add_argument('-c', '--checkpoint', default="../../../checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
 
     parser.add_argument('--threshold', type=float, default=0.5)

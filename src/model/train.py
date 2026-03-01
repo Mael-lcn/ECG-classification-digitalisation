@@ -477,7 +477,7 @@ def main():
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../../../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
+    parser.add_argument('--checkpoint_dir', type=str, default='../../../checkpoints',
                         help="Dossier où sauvegarder les poids (.pt)")
 
     # Hyperparamètres
