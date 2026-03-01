@@ -1,7 +1,9 @@
-import os
+import os, sys
+from pathlib import Path
 import argparse
 import time
 import gc
+
 import torch
 import random
 import threading
@@ -9,8 +11,11 @@ from tqdm import tqdm
 from functools import partial
 from multiprocessing.pool import ThreadPool
 
-from aux import *
+root = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root))
 
+# 2. On fait un import absolu depuis la racine
+from src.dataset.aux import *
 
 
 # --- CONFIGURATION GLOBALE ---

@@ -64,7 +64,7 @@ def get_shared_parser():
     # --- 6. Paramètres du dataloading communs ---
     group_train = parser.add_argument_group("Hyperparamètres Communs du Dataloader/Inférence")
     group_train.add_argument('--batch_size', type=int, default=64, help="Taille du batch")
-    group_train.add_argument('--mega_batch_factor', type=int, default=30,
+    group_train.add_argument('--mega_batch_factor', type=int, default=32,
                              help="Granularité du tri. Haut = padding optimisé, Bas = + d'aléatoire")
     group_train.add_argument('--use_static_padding', action='store_true', default=False,
                              help="Force une taille de padding fixe (universelle)")
