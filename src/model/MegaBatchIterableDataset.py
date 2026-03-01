@@ -84,7 +84,7 @@ class MegaBatchIterableDataset(IterableDataset):
         if self.shuffle:
             np.random.shuffle(file_indices)
 
-        # 🔹 Pool fixe y=4
+        # Pool fixe y=4
         pool_size = 4 * self.batch_size
 
         for f_idx in file_indices:
@@ -109,7 +109,7 @@ class MegaBatchIterableDataset(IterableDataset):
                 for pool_start in pool_starts:
                     pool_end = min(pool_start + pool_size, total_samples)
 
-                    # 🔥 Lecture CONTIGUË du pool (séquentielle → rapide)
+                    # Lecture CONTIGUË du pool (séquentielle → rapide)
                     raw_pool_np = ds_tracings[pool_start:pool_end]
 
                     # Option float16 disque
@@ -135,7 +135,7 @@ class MegaBatchIterableDataset(IterableDataset):
                         else:
                             target_t = int(pool_lengths[batch_rel_idx[0]])
 
-                        # 🔹 Allocation batch (CPU)
+                        # Allocation batch (CPU)
                         batch_signals = torch.zeros(
                             (cur_bs, 12, target_t),
                             dtype=torch.float32
