@@ -7,8 +7,6 @@ import math
 from tqdm import tqdm
 import glob
 
-from functools import partial
-
 import wandb
 
 import torch
@@ -21,8 +19,7 @@ from torch.utils.data import DataLoader
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from Dataset import LargeH5Dataset, ecg_collate_wrapper
-from Sampler import MegaBatchSortishSampler
+import MegaBatchIterableDataset
 from model_factory import get_shared_parser, build_model
 
 
@@ -279,22 +276,46 @@ def run(args):
     with open(args.class_map, 'r') as f: loaded_classes = json.load(f)
 
     # Création des Datasets
-    train_ds = LargeH5Dataset(input_dir=args.train_data, classes_list=loaded_classes, use_static_padding=args.use_static_padding)
-    val_ds = LargeH5Dataset(input_dir=args.val_data, classes_list=loaded_classes, use_static_padding=args.use_static_padding)
-
-    collate_fn = partial(ecg_collate_wrapper, use_static_padding=args.use_static_padding)
-
-    # Création des Samplers et Loaders
-    train_sampler = MegaBatchSortishSampler(train_ds, mega_batch_factor=args.mega_batch_factor, batch_size=args.batch_size, shuffle=True)
-    val_sampler = MegaBatchSortishSampler(val_ds, mega_batch_factor=args.mega_batch_factor, batch_size=args.batch_size, shuffle=False)
-
-    train_loader = DataLoader(
-        train_ds, collate_fn=collate_fn, batch_sampler=train_sampler, 
-        num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    print(f"[INIT] Préparation des MegaBatchIterableDatasets...")
+    
+    # Création du Dataset d'entraînement
+    train_ds = MegaBatchIterableDataset(
+        data_path=args.train_data, 
+        classes_list=loaded_classes,
+        batch_size=args.batch_size,
+        mega_batch_factor=args.mega_batch_factor,
+        shuffle=True,
+        use_static_padding=args.use_static_padding
     )
+
+    # Création du Dataset de validation
+    val_ds = MegaBatchIterableDataset(
+        data_path=args.val_data, 
+        classes_list=loaded_classes,
+        batch_size=args.batch_size,
+        mega_batch_factor=args.mega_batch_factor,
+        shuffle=False,
+        use_static_padding=args.use_static_padding
+    )
+
+    # Création des DataLoaders
+    # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=None, 
+        num_workers=args.workers, 
+        pin_memory=True, 
+        persistent_workers=(args.workers > 0), 
+        prefetch_factor=2
+    )
+
     val_loader = DataLoader(
-        val_ds, collate_fn=collate_fn, batch_sampler=val_sampler, 
-        num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
+        val_ds, 
+        batch_size=None, 
+        num_workers=args.workers, 
+        pin_memory=True, 
+        persistent_workers=(args.workers > 0), 
+        prefetch_factor=2
     )
 
     # 6. Création du Modèle

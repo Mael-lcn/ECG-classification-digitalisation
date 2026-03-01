@@ -343,10 +343,10 @@ def main():
         description="Outil de Shuffling et Sharding Offline pour Datasets HDF5 Massifs."
     )
 
-    parser.add_argument('-i', '--input', type=str, default='../output/normalize_data/',
+    parser.add_argument('-i', '--input', type=str, default='../../../output/normalize_data/',
                         help='Dossier source contenant les paires .hdf5 et .csv')
 
-    parser.add_argument('-o', '--output', type=str, default='../output/final_data/',
+    parser.add_argument('-o', '--output', type=str, default='../../../output/final_data/',
                         help='Dossier destination où seront créés les nouveaux fichiers')
 
     parser.add_argument('-s', '--shard_size', type=int, default=8000,
