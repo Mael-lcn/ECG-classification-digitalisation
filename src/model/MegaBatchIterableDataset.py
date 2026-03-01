@@ -67,100 +67,96 @@ class MegaBatchIterableDataset(IterableDataset):
         assert len(self.h5_paths) == len(self.csv_paths), "Erreur pas autant de csv que de h5"
 
     def __iter__(self):
-        """
-        Générateur SOTA : Lecture contiguë segmentée, Tri virtuel et Zero-Copy.
-        Optimisé pour le débit GPU et la sobriété RAM.
-        """
         worker_info = get_worker_info()
         num_files = len(self.h5_paths)
 
-        # 1. Distribution équitable des fichiers par Worker
+        # --- 1) Distribution workers ---
         if worker_info is None:
             file_indices = list(range(num_files))
         else:
-            per_worker = int(math.ceil(num_files / float(worker_info.num_workers)))
             worker_id = worker_info.id
-            file_indices = list(range(worker_id * per_worker, min((worker_id + 1) * per_worker, num_files)))
+            per_worker = int(math.ceil(num_files / float(worker_info.num_workers)))
+            file_indices = list(range(
+                worker_id * per_worker,
+                min((worker_id + 1) * per_worker, num_files)
+            ))
 
         if self.shuffle:
             np.random.shuffle(file_indices)
+
+        # 🔹 Pool fixe y=4
+        pool_size = 4 * self.batch_size
 
         for f_idx in file_indices:
             h5_path = self.h5_paths[f_idx]
             csv_path = self.csv_paths[f_idx]
 
-            # Chargement des métadonnées (Léger en RAM)
+            # --- 2) Metadata ---
             df = pd.read_csv(csv_path)
             labels_matrix = df.reindex(columns=self.classes, fill_value=0).astype(np.float32).values
             starts = df['start_offset'].values
             lengths = df['length'].values
             total_samples = len(df)
 
-            # 2. Mega-Pool Virtuelle (Tri global pour optimiser le padding GPU)
-            # On définit un pool d'indices sans charger les signaux
-            mega_pool_starts = list(range(0, total_samples, self.mega_batch_size))
+            # Pools contigus (lecture séquentielle)
+            pool_starts = list(range(0, total_samples, pool_size))
             if self.shuffle:
-                np.random.shuffle(mega_pool_starts)
+                np.random.shuffle(pool_starts)
 
             with h5py.File(h5_path, 'r') as h5_file:
-                for mp_start in mega_pool_starts:
-                    mp_end = min(mp_start + self.mega_batch_size, total_samples)
+                ds_tracings = h5_file['tracings']
 
-                    # Tri par longueur décroissante au sein du pool (Virtuel)
-                    pool_lengths = lengths[mp_start:mp_end]
-                    mc_argsort = np.argsort(pool_lengths)[::-1]
+                for pool_start in pool_starts:
+                    pool_end = min(pool_start + pool_size, total_samples)
 
-                    # 3. Lecture Physique par Tranches
-                    # On définit Y = 4 : on traite 4 batchs à la fois pour lisser l'I/O
-                    y_factor = 4 
-                    ram_chunk_size = self.batch_size * y_factor
+                    # 🔥 Lecture CONTIGUË du pool (séquentielle → rapide)
+                    raw_pool_np = ds_tracings[pool_start:pool_end]
 
-                    for k in range(0, len(mc_argsort), ram_chunk_size):
-                        indices_in_pool = mc_argsort[k : k + ram_chunk_size]
-                        real_indices = mp_start + indices_in_pool
+                    # Option float16 disque
+                    if raw_pool_np.dtype == np.float16:
+                        raw_pool_pt = torch.from_numpy(raw_pool_np).to(torch.float32)
+                    else:
+                        raw_pool_pt = torch.from_numpy(raw_pool_np)
 
-                        # On trouve la plage minimale/maximale pour une lecture contiguë
-                        idx_min, idx_max = np.min(real_indices), np.max(real_indices)
+                    pool_lengths = lengths[pool_start:pool_end]
 
-                        # Lecture d'un bloc physique unique (Vitesse maximale du disque)
-                        raw_block_np = h5_file['tracings'][idx_min : idx_max + 1]
+                    # Tri décroissant pour padding optimisé
+                    argsort_pool = np.argsort(pool_lengths)[::-1]
 
-                        rel_indices = real_indices - idx_min
-                        compact_np = raw_block_np[rel_indices]
+                    # --- Mini-batches dans le pool ---
+                    for j in range(0, len(argsort_pool), self.batch_size):
+                        batch_rel_idx = argsort_pool[j:j+self.batch_size]
+                        real_indices = pool_start + batch_rel_idx
 
-                        # Le gros bloc est supprimé. Seuls les signaux utiles restent
-                        del raw_block_np
+                        cur_bs = len(batch_rel_idx)
 
-                        # Zero-copy : On enveloppe la mémoire NumPy dans PyTorch
-                        raw_block_pt = torch.from_numpy(compact_np)
+                        if self.use_static_padding:
+                            target_t = MAX_SIGNAL_LENGTH
+                        else:
+                            target_t = int(pool_lengths[batch_rel_idx[0]])
 
-                        # --- 4. ASSEMBLAGE ET YIELD À LA VOLÉE ---
-                        for j in range(0, len(indices_in_pool), self.batch_size):
-                            batch_idx_in_chunk = slice(j, j + self.batch_size)
-                            cur_indices = real_indices[batch_idx_in_chunk]
-                            cur_bs = len(cur_indices)
+                        # 🔹 Allocation batch (CPU)
+                        batch_signals = torch.zeros(
+                            (cur_bs, 12, target_t),
+                            dtype=torch.float32
+                        )
 
-                            # Padding dynamique basé sur le signal le plus long du mini-batch
-                            target_t = MAX_SIGNAL_LENGTH if self.use_static_padding else lengths[cur_indices[0]]
+                        batch_labels = torch.from_numpy(labels_matrix[real_indices])
+                        batch_lens = torch.from_numpy(lengths[real_indices]).long()
 
-                            # Pré-allocation
-                            batch_signals = torch.zeros((cur_bs, 12, target_t), dtype=torch.float32)
-                            batch_labels = torch.from_numpy(labels_matrix[cur_indices])
-                            batch_lens = torch.from_numpy(lengths[cur_indices]).long()
+                        # Slice direct depuis raw_pool_pt (déjà en RAM)
+                        for i in range(cur_bs):
+                            rel_idx = batch_rel_idx[i]
+                            g_idx = real_indices[i]
 
-                            # Remplissage par slicing mémoire
-                            for i in range(cur_bs):
-                                idx = cur_indices[i]
-                                s_start = starts[idx]
-                                s_len = lengths[idx]
-                                read_len = min(s_len, target_t)
+                            s_start = starts[g_idx]
+                            s_len = lengths[g_idx]
+                            read_len = min(s_len, target_t)
 
-                                # On calcule la position relative dans le bloc lu
-                                rel_idx = idx - idx_min
-                                batch_signals[i, :, :read_len] = raw_block_pt[rel_idx, :, s_start : s_start + read_len]
+                            batch_signals[i, :, :read_len] = \
+                                raw_pool_pt[rel_idx, :, s_start:s_start+read_len]
 
-                            # Envoi direct au GPU via le DataLoader
-                            yield batch_signals, batch_labels, batch_lens
+                        yield batch_signals, batch_labels, batch_lens
 
-                        # On force la libération du bloc avant de charger le suivant
-                        del raw_block_np, raw_block_pt
+                    # nettoyage pool
+                    del raw_pool_np, raw_pool_pt

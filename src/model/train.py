@@ -304,18 +304,18 @@ def run(args):
         train_ds, 
         batch_size=None, 
         num_workers=args.workers, 
-        pin_memory=args.use_static_padding, 
+        pin_memory=True, 
         persistent_workers=(args.workers > 0), 
-        prefetch_factor=2
+        prefetch_factor=8
     )
 
     val_loader = DataLoader(
         val_ds, 
         batch_size=None, 
         num_workers=args.workers, 
-        pin_memory=args.use_static_padding, 
+        pin_memory=True, 
         persistent_workers=(args.workers > 0), 
-        prefetch_factor=2
+        prefetch_factor=8
     )
 
     # 6. Création du Modèle
