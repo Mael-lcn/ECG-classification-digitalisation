@@ -125,8 +125,14 @@ class MegaBatchIterableDataset(IterableDataset):
                         # Lecture d'un bloc physique unique (Vitesse maximale du disque)
                         raw_block_np = h5_file['tracings'][idx_min : idx_max + 1]
 
+                        rel_indices = real_indices - idx_min
+                        compact_np = raw_block_np[rel_indices]
+
+                        # Le gros bloc est supprimé. Seuls les signaux utiles restent
+                        del raw_block_np
+
                         # Zero-copy : On enveloppe la mémoire NumPy dans PyTorch
-                        raw_block_pt = torch.from_numpy(raw_block_np)
+                        raw_block_pt = torch.from_numpy(compact_np)
 
                         # --- 4. ASSEMBLAGE ET YIELD À LA VOLÉE ---
                         for j in range(0, len(indices_in_pool), self.batch_size):
