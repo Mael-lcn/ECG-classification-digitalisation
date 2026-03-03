@@ -22,16 +22,51 @@ sys.path.append(os.path.abspath(project_root))
 from TurboDataset import TurboDataset
 from model_factory import get_shared_parser, build_model
 
-
 import warnings
+
+
 
 # On dit à Python tkt c'est pas grave pour ce warning précis
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
-
-
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
+
+def generate_exp_name(args, valid_kwargs, wandb_id):
+    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
+    exp_parts = [args.model_name, pad_status]
+
+    exp_parts.append(f"bs{args.batch_size}")
+    exp_parts.append(f"lr{args.lr}")
+
+    amp_status = "AMP_F" if args.not_use_amp else "AMP_T"
+    exp_parts.append(amp_status)
+
+    # Simplifie le nommage
+    abbrv = {
+        'in_channels': 'in', 'num_classes': 'cls', 'ch1': 'c1', 'ch2': 'c2', 'ch3': 'c3', 
+        'kernel_size': 'k', 'window_size1D': 'w1D', 'n_fft': 'fft', 'context_length': 'ctx',
+        'patch_length': 'pt', 'd_model': 'dm', 'num_heads': 'hd', 'use_cross_att': 'cross'
+    }
+
+    for key, value in valid_kwargs.items():
+        if key in ["num_classes", "in_channels"]:
+            continue
+
+        name_key = abbrv.get(key, key) # Utilise le raccourci si dispo
+
+        if isinstance(value, bool):
+            val_str = "T" if value else "F"
+            exp_parts.append(f"{name_key}{val_str}")
+        elif isinstance(value, list):
+            val_str = "x".join(map(str, value))
+            exp_parts.append(f"{name_key}{val_str}")
+        else:
+            exp_parts.append(f"{name_key}{value}")
+
+    exp_parts.append(wandb_id[:6])
+    return "_".join(exp_parts)
+
 
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
@@ -222,47 +257,25 @@ def run(args):
                 resume_mode = "must"
                 print(f"[WANDB] Reprise du run ID : {wandb_id}")
 
+    # 4. Créer le model
+    print(f"[INIT] Instanciation du modèle {args.model_name}...")
+    model, valid_kwargs = build_model(args)
+    model = model.to(device)
 
+    # 5. Génération du nom d'expérience dynamique
+    exp_name = generate_exp_name(args, valid_kwargs, wandb_id)
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
-    arch_type = "FCNN" if args.use_fcnn else "CNN"
 
-    # Construction dynamique des composants du nom
-    exp_parts = [
-        args.model_name,                     # cnn_base ou cnn_spectro
-        arch_type,                           # CNN ou FCNN
-        f"ch{args.ch1}-{args.ch2}-{args.ch3}", # Capacité du réseau (ex: ch32-64-128)
-        f"lr{args.lr}",                      # Learning rate
-        f"bs{args.batch_size}",              # Batch size
-        pad_status                           # Padding
-    ]
-
-    # Ajout des paramètres spécifiques au modèle pour éviter les confusions
-    if args.model_name == "cnn_base" and args.use_fcnn:
-        exp_parts.append(f"w1D{args.window_size1D}")
-
-    elif args.model_name == "cnn_spectro":
-        exp_parts.append(f"fft{args.n_fft}")
-        if args.use_fcnn:
-            # Transforme la liste [4, 4] en "4x4" pour la lisibilité
-            w2d_str = "x".join(map(str, args.window_size2D))
-            exp_parts.append(f"w2D{w2d_str}")
-
-    # Ajout de l'ID WandB 
-    exp_parts.append(wandb_id[:6])
-
-    # Assemblage final
-    exp_name = "_".join(exp_parts)
-
-    # 5. Initialisation WandB
+    # 6. Initialisation WandB
     wandb.init(
         project="ECG_Classification_Experiments",
-        group=exp_name,        # Le groupe reflète la configuration exacte
+        group=exp_name,
         job_type="train",
-        name=f"run_{wandb_id[:6]}", # Le nom du run est unique
+        name=f"run_{wandb_id[:6]}",
         config=args,
         id=wandb_id,
         resume=resume_mode,
-        tags=["scientific", pad_status, arch_type, args.model_name, "offline"]
+        tags=["scientific", pad_status, args.model_name, "offline"]
     )
 
     # Sauvegarde de l'ID pour une future reprise
@@ -275,12 +288,6 @@ def run(args):
     wandb.define_metric("perf/*", step_metric="epoch")
 
     print(f"Début de l'expérience : {exp_name}")
-
-    # 5. Chargement des Données
-    print(f"[INIT] Chargement des classes...")
-    with open(args.class_map, 'r') as f: loaded_classes = json.load(f)
-
-    # 5. Chargement des Données
     print(f"[INIT] Préparation des TurboDatasets (Format .npy)...")
 
     # Création du Dataset d'entraînement
@@ -322,9 +329,6 @@ def run(args):
         persistent_workers=(args.workers > 0),
         prefetch_factor=2
     )
-
-    # 6. Création du Modèle
-    model = build_model(args).to(device)
 
     # Log les gradients et poids tous les 500 batchs pour diagnostic mais casse torch.compile !!!!
     # wandb.watch(model, log="all", log_freq=500)

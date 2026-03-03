@@ -1,63 +1,70 @@
 import torch
 import torch.nn as nn
 
-from transformers import PatchTSTConfig, PatchTSTForPrediction
+from transformers import PatchTSTConfig, PatchTSTModel
 
 
 
-class PatchTSTConfig_crossAtt(nn.Module):
-    def __init__(self, context_length=1600, prediction_length=400, patch_length=40, stride=20, d_model=128, 
-                 num_heads=8, encoder_layers=3, revin=False, num_input_channels=12, use_cross_att=True):
+class PatchTST_CrossAtt(nn.Module):
+    def __init__(self,
+                 in_channels=12,
+                 context_length=1600,
+                 patch_length=40,
+                 stride=20,
+                 d_model=128,
+                 num_heads=8,
+                 encoder_layers=3,
+                 revin=False,
+                 num_classes=27, 
+                 use_cross_att=True):
         super().__init__()
-        config = PatchTSTConfig(
-            context_length=1600, prediction_length=400, patch_length=40, stride=20, d_model=128, 
-                 num_heads=8, encoder_layers=3, revin=False, num_input_channels=12
+
+        # Configuration de la backbone
+        self.config = PatchTSTConfig(
+            num_input_channels=in_channels,
+            context_length=context_length,
+            patch_length=patch_length,
+            stride=stride,
+            d_model=d_model,
+            num_heads=num_heads,
+            encoder_layers=encoder_layers,
+            revin=revin
         )
 
-        # Load la backbone
-        self.backbone = PatchTSTForPrediction(
-            config
-        )
+        # Backbone
+        self.backbone = PatchTSTModel(self.config)
 
-        """
-        # Si on est en cross 
+        # Cross-Channel Attention (Mélange les 12 canaux)
+        self.use_cross_att = use_cross_att
         if use_cross_att:
-            self.head = 
-        else:
-            self.head = 
-        """
+            self.cross_att = nn.MultiheadAttention(
+                embed_dim=d_model, 
+                num_heads=8, 
+                batch_first=True
+            )
 
-    def forward(self, x, obs_mask):
-        x = self.backbone(past_values=x, past_observed_mask=obs_mask)
-        return x
-
-
-
-# Petit test
-if __name__ == '__main__':
-    device= "mps"
-    model = PatchTSTConfig_crossAtt().eval().to(device)
-    # Configuration
-    batch_size = 1
-    seq_len = 1600  # context_length
-    num_vars = 12    # num_input_channels
-    idx_reel = 1200 # Le signal s'arrête à 1200, le reste est du padding
-
-    # 1. Créer le signal avec padding
-    signal = torch.zeros(batch_size, seq_len, num_vars)
-    signal[:, :idx_reel, :] = torch.randn(batch_size, idx_reel, num_vars) # Données réelles
-
-    # 2. Créer le masque d'observation
-    obs_mask = torch.zeros(batch_size, seq_len, num_vars)
-    obs_mask[:, :idx_reel, :] = 1
-
-    with torch.no_grad():
-        signal = signal.to(device)
-        obs_mask = obs_mask.to(device)
-
-        outputs = model(
-            signal,
-            obs_mask
+        # Tête de classification (MLP à 2 couches)
+        self.classifier = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, num_classes)
         )
-        prediction = outputs.prediction_outputs.cpu()
-        print(prediction.shape)
+
+    def forward(self, x, obs_mask=None):        
+        # Passage dans le Transformer
+        outputs = self.backbone(past_values=x, past_observed_mask=obs_mask)
+        x = outputs.last_hidden_state 
+
+        # Optionnel : Cross-Attention entre les canaux
+        if self.use_cross_att:
+            x, _ = self.cross_att(x, x, x)
+
+        # Global Average Pooling
+        # On passe de [B, N_patches*C, 128] à [B, 128]
+        x = torch.mean(x, dim=1) 
+
+        # MLP Final
+        logits = self.classifier(x)
+
+        return logits

@@ -4,13 +4,15 @@ import multiprocessing
 
 from Cnn import CNN
 from Cnn_TimeFreq import CNN_TimeFreq
+from PatchTST_CrossAtt import PatchTST_CrossAtt
 
 
 
 # Defini un registre de tout les modèles
 MODEL_REGISTRY = {
     "cnn_base": CNN,
-    "cnn_spectro": CNN_TimeFreq
+    "cnn_spectro": CNN_TimeFreq,
+    "PatchTSTModel": PatchTST_CrossAtt
 }
 
 
@@ -73,6 +75,18 @@ def get_shared_parser():
     group_train.add_argument('--not_use_amp', action='store_false', default=True,
                              help="Désactive l'Automatic Mixed Precision (AMP). Passe en FP32.")
 
+    # --- 7. Architecture spécifique : Transformer (PatchTST) ---
+    group_patchtst = parser.add_argument_group("Spécifique au Transformer (PatchTST)")
+    group_patchtst.add_argument('--context_length', type=int, default=1600, help="Taille de la fenêtre temporelle en entrée")
+    group_patchtst.add_argument('--patch_length', type=int, default=40, help="Taille d'un patch (ex: 40 points = 100ms)")
+    group_patchtst.add_argument('--stride', type=int, default=20, help="Chevauchement entre les patchs")
+    group_patchtst.add_argument('--d_model', type=int, default=128, help="Dimension interne du Transformer")
+    group_patchtst.add_argument('--num_heads', type=int, default=8, help="Nombre de têtes d'attention")
+    group_patchtst.add_argument('--encoder_layers', type=int, default=3, help="Profondeur du Transformer")
+    group_patchtst.add_argument('--revin', action='store_true', default=False, help="Active la Reversible Instance Normalization")
+    group_patchtst.add_argument('--no_cross_att', dest='use_cross_att', action='store_false', default=True, 
+                                help="Désactive la Multi-Head Attention entre les canaux")
+
     return parser
 
 
@@ -91,4 +105,4 @@ def build_model(args_namespace):
     valid_kwargs = {k: v for k, v in args_dict.items() if k in sig.parameters}
 
     print(f"Le modèle: {model_name} à bien été instancié")
-    return ModelClass(**valid_kwargs)
+    return ModelClass(**valid_kwargs), valid_kwargs
