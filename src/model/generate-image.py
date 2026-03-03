@@ -7,7 +7,8 @@ import scipy.signal
 
 
 
-def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=4096, scale_y=16.0):
+def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=4000, scale_y=16.0):
+    tracings = torch.transpose(tracings, 1, 2)
     B, C, T = tracings.shape
 
     step = segment_size
@@ -58,7 +59,7 @@ def create_image_12leads_optimized_cleaned(tracings, h=518, w=518, segment_size=
 
 
 if __name__ == "__main__":
-    file_path = "../../../exams_part0.hdf5"
+    file_path = "../../../output/normalize_data/georgia.hdf5"
 
     with h5py.File(file_path, 'r') as f:
         tracings  = torch.from_numpy(f['tracings'][:10]).permute(0, 2, 1)
