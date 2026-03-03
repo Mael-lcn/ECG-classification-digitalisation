@@ -51,7 +51,8 @@ class PatchTST_CrossAtt(nn.Module):
             nn.Linear(64, num_classes)
         )
 
-    def forward(self, x, obs_mask=None):        
+    def forward(self, x, obs_mask=None):   
+        x = x.transpose(1, 2)     
         # Passage dans le Transformer
         outputs = self.backbone(past_values=x, past_observed_mask=obs_mask)
         x = outputs.last_hidden_state 

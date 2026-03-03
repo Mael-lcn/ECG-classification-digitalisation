@@ -136,7 +136,16 @@ class TurboDataset(IterableDataset):
                     batch_y = torch.from_numpy(mb_labels[batch_idx])
                     batch_lens = torch.from_numpy(mb_lengths[batch_idx]).long()
 
-                    yield batch_x, batch_y, batch_lens
+                    # Création d'un vecteur temps [0, 1, 2, ..., target_t - 1]
+                    time_steps = torch.arange(target_t).unsqueeze(0)
+
+                    # Masque booléen 2D [cur_bs, target_t] (True si signal valide, False si padding)
+                    mask_bool = time_steps < batch_lens.unsqueeze(1)
+
+                    # Expansion aux 12 canaux et passage en float (1.0 = vrai, 0.0 = pad)
+                    batch_mask = mask_bool.unsqueeze(-1).expand(cur_bs, target_t, 12).float()
+
+                    yield batch_x, batch_y, batch_mask
 
     def __len__(self):
         """

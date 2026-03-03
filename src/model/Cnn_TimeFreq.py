@@ -63,7 +63,7 @@ class CNN_TimeFreq(nn.Module):
         else:
             self.fc = nn.Linear(ch3, num_classes)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         """
         Args:
             x: (batch_size, n_leads, n_samples)

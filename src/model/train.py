@@ -101,15 +101,16 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
     count = 0
 
     for batch in loop:
-        tracings, targets, _ = batch
+        tracings, targets, batch_mask = batch
         tracings = tracings.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
+        batch_mask = batch_mask.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
         # Forward Pass
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
-            predictions = model(tracings)
+            predictions = model(tracings, batch_mask)
             loss = criterion(predictions, targets)
 
         # Backward Pass
@@ -170,12 +171,13 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
 
     with torch.no_grad():
         for batch in loop:
-            tracings, targets, _ = batch
+            tracings, targets, batch_mask = batch
             tracings = tracings.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
+            batch_mask = batch_mask.to(device, non_blocking=True)
 
             with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
-                predictions = model(tracings)
+                predictions = model(tracings, batch_mask)
                 loss = criterion(predictions, targets)
 
             loss_val = loss.item()

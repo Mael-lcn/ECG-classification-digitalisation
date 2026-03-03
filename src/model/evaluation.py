@@ -192,16 +192,17 @@ def evaluate(model, dataloader, device, threshold):
     all_labels, all_probs, all_binary = [], [], []
 
     with torch.no_grad():
-        for x, y, _ in tqdm(dataloader, desc="[EVAL]"):
+        for x, y, batch_mask in tqdm(dataloader, desc="[EVAL]"):
             x = x.to(device)
             y = y.to(device)
+            batch_mask = batch_mask.to(device)
 
             if x.shape[-1] == 0:
                 print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
 
             #probs = model(x)
-            probs = torch.sigmoid(model(x))
+            probs = torch.sigmoid(model(x, batch_mask))
             binary = (probs >= threshold).int()
 
             all_labels.append(y.cpu())
