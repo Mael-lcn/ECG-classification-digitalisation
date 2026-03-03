@@ -446,7 +446,7 @@ def main():
     try:
         artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
         if os.path.exists(args.checkpoint_dir):
-            artifact.add_file(args.checkpoint_dir)
+            artifact.add_file(args.checkpoint)
         wandb.log_artifact(artifact)
     except Exception as e:
         print(f"[WARN] Artifact upload skipped: {e}")
