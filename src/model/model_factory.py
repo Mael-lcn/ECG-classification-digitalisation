@@ -22,6 +22,8 @@ def get_shared_parser():
     group_sys = parser.add_argument_group("Configuration Système & Fichiers")
     group_sys.add_argument('--output', type=str, default='../../../output/',
                            help="Dossier de sortie standard")
+    parser.add_argument('--checkpoint_dir', default="../../../checkpoints/", help="Dossier où sauvegarder les poids (.pt)")
+
     group_sys.add_argument('--class_map', type=str, default='../../ressources/final_class.json',
                            help="Chemin JSON mappant les indices aux noms de classes")    
     group_sys.add_argument('--workers', type=int, default=min(8, multiprocessing.cpu_count()-1),

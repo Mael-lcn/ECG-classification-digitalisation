@@ -16,8 +16,7 @@ import wandb
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from Dataset import LargeH5Dataset, ecg_collate_wrapper
-from Sampler import MegaBatchSortishSampler
+from TurboDataset import TurboDataset
 from model_factory import get_shared_parser, build_model
 
 
@@ -300,8 +299,8 @@ def main():
         parents=[shared_parser]
     )
 
-    parser.add_argument('--data', default="../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('-c', '--checkpoint', default="../../../checkpoints/best_model_ep49.pt", help="Trained model checkpoint")
+    parser.add_argument('--data', default="../../../output/final_data/test", help="HDF5 test dataset directory")
+    parser.add_argument('-c', '--checkpoint', default="best_model_ep49.pt", help="Trained model checkpoint")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
 
     parser.add_argument('--threshold', type=float, default=0.5)
@@ -328,13 +327,12 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     os.environ["WANDB_MODE"] = "offline"
     # On prend le dossier parent de output
-    parent_output_dir = os.path.dirname(os.path.normpath(args.output))
     # On crée le dossier wandb_logs dans ce dossier parent
-    os.environ["WANDB_DIR"] = os.path.join(parent_output_dir, "wandb_logs")
+    os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
     # Extraction du nom de fichier depuis le chemin complet
-    checkpoint_basename = os.path.basename(args.checkpoint)
+    checkpoint_basename = args.checkpoint_dir
 
     # Retrouver le nom de l'expérience
     group_id = checkpoint_basename.split('_ep')[0].replace('best_model_', '')
@@ -357,24 +355,38 @@ def main():
     print(f"Début de l'évaluation : {checkpoint_basename}")
 
     # ================= DATASET & DATALOADER =================
-    dataset = LargeH5Dataset(args.data, classes_list=class_list, use_static_padding=False)
-    collate_fn = partial(ecg_collate_wrapper, use_static_padding=args.use_static_padding)
-    sampler = MegaBatchSortishSampler(dataset, batch_size=args.batch_size, mega_batch_factor=50, shuffle=True)
-    loader = DataLoader(
-        dataset, collate_fn=collate_fn, batch_sampler=sampler,
-        num_workers=args.workers, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    mb_size = args.batch_size * args.mega_batch_factor
+
+    # Création du Dataset d'entraînement
+    test_ds = TurboDataset(
+        data_path=args.data,
+        batch_size=args.batch_size,
+        mega_batch_size=mb_size,
+        use_static_padding=args.use_static_padding
     )
+
+    # Création des DataLoaders
+    # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=(args.workers > 0), 
+        prefetch_factor=2
+    )
+
 
     # ================= MODEL =================
     model = build_model(args).to(device).to(device)
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(os.path.join(args.checkpoint_dir, args.checkpoint), map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=False)
     model = torch.compile(model)
 
     # ================= EVALUATION =================
     print('Evaluating model...')
-    labels, binary, probs = evaluate(model, loader, device, args.threshold)
+    labels, binary, probs = evaluate(model, test_loader, device, args.threshold)
 
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
@@ -433,14 +445,14 @@ def main():
     # Artifact upload 
     try:
         artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
-        if os.path.exists(args.checkpoint):
-            artifact.add_file(args.checkpoint)
+        if os.path.exists(args.checkpoint_dir):
+            artifact.add_file(args.checkpoint_dir)
         wandb.log_artifact(artifact)
     except Exception as e:
         print(f"[WARN] Artifact upload skipped: {e}")
 
     # ================= SAVE CSV =================
-    name = os.path.splitext(os.path.basename(args.checkpoint))[0]
+    name = args.checkpoint
 
     output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:

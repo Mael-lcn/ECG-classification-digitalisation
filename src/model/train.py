@@ -301,20 +301,20 @@ def run(args):
     # Création des DataLoaders
     # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
     train_loader = DataLoader(
-        train_ds, 
-        batch_size=None, 
-        num_workers=args.workers, 
-        pin_memory=True, 
+        train_ds,
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
         persistent_workers=(args.workers > 0), 
-        prefetch_factor=2 # Réduit car les shards sont déjà massifs (8k)
+        prefetch_factor=2
     )
 
     val_loader = DataLoader(
-        val_ds, 
-        batch_size=None, 
-        num_workers=args.workers, 
-        pin_memory=True, 
-        persistent_workers=(args.workers > 0), 
+        val_ds,
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=(args.workers > 0),
         prefetch_factor=2
     )
 
@@ -398,6 +398,14 @@ def run(args):
                     previous = best_val_loss
                     best_val_loss = val_loss
                     stagnation_counter = 0
+                    
+                    # Supprime l'ancienne best
+                    old_files = glob.glob(os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt"))
+                    for f in old_files:
+                        try:
+                            os.remove(f)
+                        except OSError as e:
+                            print(f"Erreur lors de la suppression de {f}: {e}")
 
                     # Sauvegarde disque du model
                     save_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
@@ -435,25 +443,24 @@ def run(args):
     wandb.run.summary["total_train_time_hours"] = total_duration_hours
 
     # Versionning du modèle final
-    print("[WANDB] Upload du modèle final en cours...")
-    files = glob.glob(os.path.join(args.checkpoint_dir, f"best_model*.pt"))
-    if files:
-        model_path = files[0]
+    print(f"\n[WANDB] Upload du modèle final ({exp_name}) en cours...")
 
-        # Créer l'artefact et ajouter le fichier
-        artifact = wandb.Artifact(f"model-{wandb.run.id}", type='model')
+    # On cherche le bon modèle avec l'exp_name
+    search_pattern = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt")
+    final_model_files = glob.glob(search_pattern)
+
+    if final_model_files:
+        model_path = final_model_files[0] # Normalement il n'y en a qu'un seul grâce au nettoyage
+        print(f"[WANDB] Fichier trouvé : {os.path.basename(model_path)}")
+
+        # Création et upload de l'artefact
+        artifact_name = f"model-{wandb.run.id}"
+        artifact = wandb.Artifact(artifact_name, type='model')
         artifact.add_file(model_path)
-        # Upload
         wandb.log_artifact(artifact)
+        print("[WANDB] Upload terminé avec succès.")
     else:
-        print(f"[WANDB] ERREUR : Aucun modèle trouvé dans {args.checkpoint_dir}")
-
-    best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}.pt")
-    if os.path.exists(best_model_path):
-        artifact.add_file(best_model_path)
-        wandb.log_artifact(artifact)
-    else:
-        print("[WARN] Pas de fichier 'best_model.pt' trouvé pour l'upload.")
+        print(f"[WANDB] ERREUR : Aucun modèle trouvé pour le pattern {search_pattern}")
 
     wandb.finish()
     print(f"[FIN] Terminé en {total_duration_hours:.2f} heures. Best Loss: {best_val_loss}")
@@ -478,9 +485,6 @@ def main():
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../../../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
-    parser.add_argument('--checkpoint_dir', type=str, default='../../../checkpoints',
-                        help="Dossier où sauvegarder les poids (.pt)")
-
     # Hyperparamètres
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
