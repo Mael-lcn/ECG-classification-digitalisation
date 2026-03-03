@@ -23,6 +23,11 @@ from TurboDataset import TurboDataset
 from model_factory import get_shared_parser, build_model
 
 
+import warnings
+
+# On dit à Python tkt c'est pas grave pour ce warning précis
+warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
+
 
 
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile

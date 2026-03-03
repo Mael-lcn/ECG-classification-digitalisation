@@ -72,8 +72,7 @@ class TurboDataset(IterableDataset):
 
         # Répartition des shards entre les workers du DataLoader
         if worker_info is not None:
-            per_worker = int(np.ceil(len(indices_shards) / float(worker_info.num_workers)))
-            indices_shards = indices_shards[worker_info.id * per_worker : (worker_info.id + 1) * per_worker]
+            indices_shards = indices_shards[worker_info.id :: worker_info.num_workers]
 
         # Mélange global de l'ordre de lecture des shards pour la diversité stochastique
         np.random.shuffle(indices_shards)

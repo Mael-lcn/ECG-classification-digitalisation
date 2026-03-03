@@ -4,7 +4,6 @@ import json
 import argparse
 import numpy as np
 import torch
-from functools import partial
 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
