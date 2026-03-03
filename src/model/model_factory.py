@@ -77,7 +77,7 @@ def get_shared_parser():
 
     # --- 7. Architecture spécifique : Transformer (PatchTST) ---
     group_patchtst = parser.add_argument_group("Spécifique au Transformer (PatchTST)")
-    group_patchtst.add_argument('--context_length', type=int, default=1600, help="Taille de la fenêtre temporelle en entrée")
+    group_patchtst.add_argument('--context_length', type=int, default=4096, help="Taille de la fenêtre temporelle en entrée")
     group_patchtst.add_argument('--patch_length', type=int, default=40, help="Taille d'un patch (ex: 40 points = 100ms)")
     group_patchtst.add_argument('--stride', type=int, default=20, help="Chevauchement entre les patchs")
     group_patchtst.add_argument('--d_model', type=int, default=128, help="Dimension interne du Transformer")

@@ -1,6 +1,7 @@
+import math
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from transformers import PatchTSTConfig, PatchTSTModel
 
 
@@ -13,13 +14,13 @@ class PatchTST_CrossAtt(nn.Module):
                  stride=20,
                  d_model=128,
                  num_heads=8,
+                 cross_att_heads=8,
                  encoder_layers=3,
                  revin=False,
                  num_classes=27, 
                  use_cross_att=True):
         super().__init__()
 
-        # Configuration de la backbone
         self.config = PatchTSTConfig(
             num_input_channels=in_channels,
             context_length=context_length,
@@ -31,19 +32,17 @@ class PatchTST_CrossAtt(nn.Module):
             revin=revin
         )
 
-        # Backbone
         self.backbone = PatchTSTModel(self.config)
 
-        # Cross-Channel Attention (Mélange les 12 canaux)
         self.use_cross_att = use_cross_att
         if use_cross_att:
             self.cross_att = nn.MultiheadAttention(
                 embed_dim=d_model, 
-                num_heads=8, 
+                num_heads=cross_att_heads, 
                 batch_first=True
             )
+            self.query_token = nn.Parameter(torch.randn(1, 1, d_model))
 
-        # Tête de classification (MLP à 2 couches)
         self.classifier = nn.Sequential(
             nn.Linear(d_model, 64),
             nn.ReLU(),
@@ -51,21 +50,73 @@ class PatchTST_CrossAtt(nn.Module):
             nn.Linear(64, num_classes)
         )
 
-    def forward(self, x, obs_mask=None):   
-        x = x.transpose(1, 2)     
-        # Passage dans le Transformer
-        outputs = self.backbone(past_values=x, past_observed_mask=obs_mask)
-        x = outputs.last_hidden_state 
+    def forward(self, x, obs_mask=None, **kwargs):
+        B, C, T = x.shape
+        ctx_len = self.config.context_length
 
-        # Optionnel : Cross-Attention entre les canaux
-        if self.use_cross_att:
-            x, _ = self.cross_att(x, x, x)
+        # Cas 1 : SIGNAL COURT (<= context_length)
+        if T <= ctx_len:
+            pad_len = ctx_len - T
+            x = F.pad(x, (0, pad_len))
+            if obs_mask is not None:
+                obs_mask = F.pad(obs_mask, (0, 0, 0, pad_len))
 
-        # Global Average Pooling
-        # On passe de [B, N_patches*C, 128] à [B, 128]
-        x = torch.mean(x, dim=1) 
+            x = x.transpose(1, 2)
+            outputs = self.backbone(past_values=x, past_observed_mask=obs_mask)
 
-        # MLP Final
-        logits = self.classifier(x)
+            out = outputs.last_hidden_state 
 
-        return logits
+            # 1. On moyenne les patchs pour obtenir 1 vecteur de contexte par canal -> [B, C, d_model]
+            out = torch.mean(out, dim=2) 
+    
+            # 2. Vraie corss attention !
+            if self.use_cross_att:
+                # Q = Notre super token résumé global étendu au batch [B, 1, d_model]
+                Q = self.query_token.expand(B, -1, -1)
+
+                # K, V = Les 12 canaux [B, 12, d_model]
+                out, _ = self.cross_att(query=Q, key=out, value=out)
+                out = out.squeeze(1) # [B, d_model]
+            else:
+                out = torch.mean(out, dim=1) # [B, d_model]
+
+            logits = self.classifier(out)
+            return logits
+
+        # Cas 2 : SIGNAL LONG (> context_length) -> FCNN
+        else:
+            num_chunks = math.ceil(T / ctx_len)
+            pad_len = (num_chunks * ctx_len) - T
+            x_padded = F.pad(x, (0, pad_len)) 
+
+            x_chunks = x_padded.view(B * num_chunks, C, ctx_len)
+            
+            if obs_mask is not None:
+                mask_padded = F.pad(obs_mask, (0, 0, 0, pad_len))
+                mask_chunks = mask_padded.view(B * num_chunks, ctx_len, C)
+            else:
+                mask_chunks = None
+                
+            x_chunks = x_chunks.transpose(1, 2)
+            outputs = self.backbone(past_values=x_chunks, past_observed_mask=mask_chunks)
+            
+            out = outputs.last_hidden_state 
+
+            # Moyenne des patchs -> [B * num_chunks, 12, d_model]
+            out = torch.mean(out, dim=2) 
+
+            # 2.Cross attention
+            if self.use_cross_att:
+                B_current = out.shape[0]
+                Q = self.query_token.expand(B_current, -1, -1)
+                out, _ = self.cross_att(query=Q, key=out, value=out)
+                out = out.squeeze(1) # [B * num_chunks, d_model]
+            else:
+                out = torch.mean(out, dim=1)
+
+            # 3. Regroupement par examen et moyenne globale temporelle
+            out = out.view(B, num_chunks, -1)
+            out = torch.mean(out, dim=1) # [B, d_model]
+
+            logits = self.classifier(out)
+            return logits
