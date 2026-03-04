@@ -266,7 +266,6 @@ def run(args):
 
     # 5. Génération du nom d'expérience dynamique
     exp_name = generate_exp_name(args, valid_kwargs, wandb_id)
-    pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
 
     # 6. Initialisation WandB
     wandb.init(
@@ -277,7 +276,7 @@ def run(args):
         config=args,
         id=wandb_id,
         resume=resume_mode,
-        tags=["scientific", pad_status, args.model_name, "offline"]
+        tags=["scientific", args.model_name, "offline"]
     )
 
     # Sauvegarde de l'ID pour une future reprise
