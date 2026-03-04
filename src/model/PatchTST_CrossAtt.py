@@ -128,7 +128,7 @@ class PatchTST_CrossAtt(nn.Module):
             out = torch.cat(chunk_outputs, dim=1) 
 
             # Moyenne temporelle sur l'ensemble des blocs : [B, C, d_model]
-            out = torch.max(out, dim=1) 
+            out, _ = torch.max(out, dim=1) 
 
             # Application de la Cross-Attention
             if self.use_cross_att:
