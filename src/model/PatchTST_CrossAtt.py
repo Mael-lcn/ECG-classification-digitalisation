@@ -54,7 +54,7 @@ class PatchTST_CrossAtt(nn.Module):
         B, C, T = x.shape
         ctx_len = self.config.context_length
 
-        # Cas 1 : SIGNAL COURT (<= context_length)
+        # Cas 1 : Signal inférieur ou égal à la taille de contexte
         if T <= ctx_len:
             pad_len = ctx_len - T
             x = F.pad(x, (0, pad_len))
@@ -65,58 +65,79 @@ class PatchTST_CrossAtt(nn.Module):
             outputs = self.backbone(past_values=x, past_observed_mask=obs_mask)
 
             out = outputs.last_hidden_state 
-
-            # 1. On moyenne les patchs pour obtenir 1 vecteur de contexte par canal -> [B, C, d_model]
             out = torch.mean(out, dim=2) 
-    
-            # 2. Vraie corss attention !
-            if self.use_cross_att:
-                # Q = Notre super token résumé global étendu au batch [B, 1, d_model]
-                Q = self.query_token.expand(B, -1, -1)
 
-                # K, V = Les 12 canaux [B, 12, d_model]
+            if self.use_cross_att:
+                Q = self.query_token.expand(B, -1, -1)
                 out, _ = self.cross_att(query=Q, key=out, value=out)
-                out = out.squeeze(1) # [B, d_model]
+                out = out.squeeze(1) 
             else:
-                out = torch.mean(out, dim=1) # [B, d_model]
+                out = torch.mean(out, dim=1) 
 
             logits = self.classifier(out)
             return logits
 
-        # Cas 2 : SIGNAL LONG (> context_length) -> FCNN
+        # Cas 2 : Signal long traité par mini-lots de blocs (chunks)
         else:
             num_chunks = math.ceil(T / ctx_len)
             pad_len = (num_chunks * ctx_len) - T
-            x_padded = F.pad(x, (0, pad_len)) 
 
-            x_chunks = x_padded.view(B * num_chunks, C, ctx_len)
-            
+            # Application du padding pour obtenir un multiple exact de ctx_len
+            x_padded = F.pad(x, (0, pad_len)) 
+            x_chunks = x_padded.view(B, num_chunks, C, ctx_len)
+
             if obs_mask is not None:
                 mask_padded = F.pad(obs_mask, (0, 0, 0, pad_len))
-                mask_chunks = mask_padded.view(B * num_chunks, ctx_len, C)
+                mask_chunks = mask_padded.view(B, num_chunks, ctx_len, C)
             else:
                 mask_chunks = None
                 
-            x_chunks = x_chunks.transpose(1, 2)
-            outputs = self.backbone(past_values=x_chunks, past_observed_mask=mask_chunks)
-            
-            out = outputs.last_hidden_state 
+            chunk_outputs = []
+            chunk_batch_size = 1  # Paramètre d'optimisation : nombre de blocs traités simultanément
 
-            # Moyenne des patchs -> [B * num_chunks, 12, d_model]
-            out = torch.mean(out, dim=2) 
+            # Itération sur les blocs avec un pas de 'chunk_batch_size'
+            for i in range(0, num_chunks, chunk_batch_size):
+                # Extraction des blocs courants (peut être inférieur à chunk_batch_size à la fin)
+                x_i = x_chunks[:, i:i+chunk_batch_size, :, :]
+                current_step = x_i.shape[1]
+    
+                # Fusion des dimensions Batch et Chunks pour le passage dans le modèle
+                # Shape finale attendue par HF : [B * current_step, ctx_len, C]
+                x_i_flat = x_i.reshape(B * current_step, C, ctx_len).transpose(1, 2)
 
-            # 2.Cross attention
+                if mask_chunks is not None:
+                    mask_i = mask_chunks[:, i:i+chunk_batch_size, :, :]
+                    mask_i_flat = mask_i.reshape(B * current_step, ctx_len, C)
+                else:
+                    mask_i_flat = None
+
+                # Passage dans le Transformer
+                outputs_i = self.backbone(past_values=x_i_flat, past_observed_mask=mask_i_flat)
+
+                # Récupération de l'état caché : [B * current_step, C, N_patches, d_model]
+                out_i = outputs_i.last_hidden_state 
+
+                # Moyenne spatiale sur les patchs : [B * current_step, C, d_model]
+                out_i = torch.mean(out_i, dim=2) 
+
+                # Restauration des dimensions : [B, current_step, C, d_model]
+                out_i = out_i.view(B, current_step, C, -1)
+                chunk_outputs.append(out_i)
+
+            # Concaténation de tous les sous-groupes de blocs : [B, num_chunks, C, d_model]
+            out = torch.cat(chunk_outputs, dim=1) 
+
+            # Moyenne temporelle sur l'ensemble des blocs : [B, C, d_model]
+            out = torch.max(out, dim=1) 
+
+            # Application de la Cross-Attention
             if self.use_cross_att:
-                B_current = out.shape[0]
-                Q = self.query_token.expand(B_current, -1, -1)
+                Q = self.query_token.expand(B, -1, -1)
                 out, _ = self.cross_att(query=Q, key=out, value=out)
-                out = out.squeeze(1) # [B * num_chunks, d_model]
+                out = out.squeeze(1) 
             else:
-                out = torch.mean(out, dim=1)
+                out = torch.mean(out, dim=1) 
 
-            # 3. Regroupement par examen et moyenne globale temporelle
-            out = out.view(B, num_chunks, -1)
-            out = torch.mean(out, dim=1) # [B, d_model]
-
+            # Classification finale
             logits = self.classifier(out)
             return logits
