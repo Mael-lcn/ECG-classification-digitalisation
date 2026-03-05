@@ -5,7 +5,7 @@ handling the two subdataset formats:
   - Partial format: 7 classes (15Percent: 1dAVb, RBBB, LBBB, SB, ST, AF + NSR)
 
 The resulting pos_weight tensor is saved as:
-  output/pos_weight.pt   → ready to be loaded in train.py
+  ressources/pos_weight.pt ready to be loaded in train.py
 """
 
 import os
@@ -16,13 +16,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-
-ALL_CLASSES = [
-    "AF", "AFL", "BBB", "Brady", "LBBB", "RBBB", "1dAVb",
-    "LAD", "LAnFB", "LPR", "LQRSV", "LQT", "NSIVCB", "NSR",
-    "PAC", "PR", "PRWP", "PVC", "QAb", "RAD", "SA", "SB",
-    "ST", "SVPB", "TAb", "TInv", "VPB"
-]
 
 
 def compute_pos_weight(data_dir: str, all_classes: list, output_dir: str):
@@ -64,7 +57,7 @@ def compute_pos_weight(data_dir: str, all_classes: list, output_dir: str):
             pos_counts[cls]   += p
             total_counts[cls] += n_rows
 
-    # ── Print summary table ──────────────────────────────────────────────────
+    # Print summary table 
     print("\n" + "=" * 65)
     print(f"{'Class':<12} {'Total ECGs':>12} {'Positives':>12} {'Negatives':>12} {'pos_weight':>12}")
     print("=" * 65)
@@ -83,7 +76,7 @@ def compute_pos_weight(data_dir: str, all_classes: list, output_dir: str):
             # Class present in some CSVs but zero positives — very rare edge case
             # Assign a high weight equal to total (entire dataset is negative)
             w = float(total)
-            print(f"{cls:<12} {total:>12,} {p:>12,} {n:>12,} {w:>12.2f}  ← NO POSITIVES!")
+            print(f"{cls:<12} {total:>12,} {p:>12,} {n:>12,} {w:>12.2f}  NO POSITIVES!")
         else:
             w = n / p
             print(f"{cls:<12} {total:>12,} {p:>12,} {n:>12,} {w:>12.2f}")
@@ -92,44 +85,41 @@ def compute_pos_weight(data_dir: str, all_classes: list, output_dir: str):
 
     print("=" * 65)
 
-    # ── Save as .pt tensor ───────────────────────────────────────────────────
+    # Save as .pt tensor
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, "pos_weight.pt")
 
     pos_weight_tensor = torch.tensor(pos_weight_values, dtype=torch.float32)
     torch.save(pos_weight_tensor, save_path)
 
-    print(f"\n[OK] pos_weight tensor saved → {save_path}")
-    print(f"     Shape : {pos_weight_tensor.shape}")
-    print(f"     Min   : {pos_weight_tensor.min():.4f}  |  Max : {pos_weight_tensor.max():.4f}")
+    print(f"\npos_weight tensor saved → {save_path}")
+    print(f"  Shape : {pos_weight_tensor.shape}")
+    print(f"  Min   : {pos_weight_tensor.min():.4f}  |  Max : {pos_weight_tensor.max():.4f}")
 
-    # Also save a human-readable JSON for reference
+    # Save a human-readable JSON for reference
     json_path = os.path.join(output_dir, "pos_weight.json")
     with open(json_path, "w") as f:
         json.dump({cls: round(w, 6) for cls, w in zip(all_classes, pos_weight_values)}, f, indent=2)
-    print(f"[OK] Human-readable weights  → {json_path}")
+    print(f"Human-readable weights: {json_path}")
 
     return pos_weight_tensor
 
 
 def main():
     parser = argparse.ArgumentParser(description="Compute pos_weight for BCEWithLogitsLoss")
-    parser.add_argument("--data_dir",     type=str, required=True,
+    parser.add_argument("--data_dir",     type=str, required=True, default="../output/normalize_data",
                         help="Root folder containing all normalized CSV files (searched recursively)")
-    parser.add_argument("--classes_json", type=str, default=None,
-                        help="Optional path to final_classes.json. If omitted, uses built-in list.")
-    parser.add_argument("--output_dir",   type=str, required=True,
+    parser.add_argument("--classes_json", type=str, required=True, default="/ressources/final_class.json",
+                        help="Path to final_classes.json")
+    parser.add_argument("--output_dir",   type=str, required=True, default="/ressources",
                         help="Where to save pos_weight.pt and pos_weight.json")
     args = parser.parse_args()
 
     # Load class list
-    if args.classes_json and os.path.exists(args.classes_json):
-        with open(args.classes_json) as f:
-            classes = json.load(f)
-        print(f"[INFO] Loaded {len(classes)} classes from {args.classes_json}")
-    else:
-        classes = ALL_CLASSES
-        print(f"[INFO] Using built-in class list ({len(classes)} classes)")
+    with open(args.classes_json) as f:
+        classes = json.load(f)
+    print(f"Loaded {len(classes)} classes from {args.classes_json}")
+
 
     compute_pos_weight(args.data_dir, classes, args.output_dir)
 
