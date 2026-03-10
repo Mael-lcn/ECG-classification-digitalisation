@@ -30,7 +30,8 @@ import warnings
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
-torch._dynamo.config.recompile_limit = 6000
+#torch._dynamo.config.recompile_limit = 6000
+torch._dynamo.config.cache_size_limit = 6000
 
 def generate_exp_name(args, valid_kwargs, wandb_id):
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
@@ -67,7 +68,43 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
     exp_parts.append(wandb_id[:6])
     return "_".join(exp_parts)
 
+def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device) -> torch.Tensor | None:
+    """
+    Loads the pre-computed pos_weight tensor and moves it to the target device.
+    The tensor is expected to have been produced by compute_pos_weight.py and saved
+    via torch.save(). Its shape must be (num_classes,).
+    If the file does not exist, or the shape is wrong, a warning is printed and
+    None is returned — the caller will then fall back to unweighted BCE loss.
 
+    Args:
+        pos_weight_path : Absolute or relative path to the .pt file.
+        num_classes     : Expected number of classes (used for shape validation).
+        device          : The device on which training runs.
+
+    Returns:
+        torch.Tensor of shape (num_classes,) on `device`, or None on failure.
+    """
+    if not pos_weight_path:
+        print("[POS_WEIGHT] No path provided — using unweighted BCEWithLogitsLoss.")
+        return None
+
+    if not os.path.exists(pos_weight_path):
+        print(f"[POS_WEIGHT] WARNING: File not found at '{pos_weight_path}'. "
+              "Falling back to unweighted loss.")
+        return None
+
+    pw = torch.load(pos_weight_path, map_location=device)
+
+    if pw.shape != (num_classes,):
+        print(f"[POS_WEIGHT] WARNING: Shape mismatch — expected ({num_classes},), "
+              f"got {tuple(pw.shape)}. Falling back to unweighted loss.")
+        return None
+
+    print(f"[POS_WEIGHT] Loaded from '{pos_weight_path}'")
+    print(f"    Shape : {pw.shape}")
+    print(f"    Min   : {pw.min():.4f}  |  Max : {pw.max():.4f}  |  Mean : {pw.mean():.4f}")
+
+    return pw.to(device)
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
     """
@@ -96,7 +133,7 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
     """
     model.train()
 
-    loop = tqdm(dataloader, desc=f"Ep {epoch}/{total_epochs} [TRAIN]")
+    loop = tqdm(dataloader, desc=f"Ep {epoch}/{total_epochs} [TRAIN]", dynamic_ncols=False)
     total_loss = 0
     count = 0
 
@@ -110,7 +147,7 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 
         # Forward Pass
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
-            predictions = model(tracings, batch_mask)
+            predictions = model(tracings, batch_mask=batch_mask)
             loss = criterion(predictions, targets)
 
         # Backward Pass
@@ -177,7 +214,7 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
             batch_mask = batch_mask.to(device, non_blocking=True)
 
             with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
-                predictions = model(tracings, batch_mask)
+                predictions = model(tracings, batch_mask=batch_mask)
                 loss = criterion(predictions, targets)
 
             loss_val = loss.item()
@@ -342,7 +379,17 @@ def run(args):
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
+    
+    # MODIFIED: Build criterion with optional pos_weight
+    pos_weight_tensor = load_pos_weight(
+        pos_weight_path=args.pos_weight_path,
+        num_classes=args.num_classes, 
+        device=device
+    )
+
+    # BCEWithLogitsLoss accepts pos_weight=None natively (falls back to no weighting)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+
     scaler_amp = torch.amp.GradScaler('cuda') if use_amp else None
 
     # 7. Logique de Reprise
@@ -503,6 +550,16 @@ def main():
     # Arguments Système
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")
+
+    # NEW ARGUMENT for pos_weight per class
+    parser.add_argument(
+        '--pos_weight_path', type=str, default="../ressources/pos_weight.pt",
+        help=(
+            "Path to the pre-computed pos_weight .pt file "
+            "(output of compute_pos_weight.py). "
+            "If omitted, BCEWithLogitsLoss runs without class weighting."
+        )
+    )
 
     args = parser.parse_args()
 
