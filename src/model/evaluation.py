@@ -378,7 +378,8 @@ def main():
 
 
     # ================= MODEL =================
-    model = build_model(args).to(device).to(device)
+    model, valid_kwargs = build_model(args)
+    model = model.to(device)
     checkpoint = torch.load(os.path.join(args.checkpoint_dir, args.checkpoint), map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=False)
