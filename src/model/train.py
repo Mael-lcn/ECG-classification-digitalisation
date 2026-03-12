@@ -227,7 +227,7 @@ def run(args):
     # 1. Configuration Matérielle
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        use_amp = args.not_use_amp
+        use_amp = not args.not_use_amp
         torch.backends.cudnn.benchmark = args.use_static_padding
         print("[INIT] Mode: CUDA")
     else:

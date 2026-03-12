@@ -91,7 +91,7 @@ class PatchTST_CrossAtt(nn.Module):
                 mask_chunks = mask_padded.view(B, num_chunks, ctx_len, C)
             else:
                 mask_chunks = None
-                
+
             chunk_outputs = []
             chunk_batch_size = 1  # Paramètre d'optimisation : nombre de blocs traités simultanément
 
@@ -100,7 +100,7 @@ class PatchTST_CrossAtt(nn.Module):
                 # Extraction des blocs courants (peut être inférieur à chunk_batch_size à la fin)
                 x_i = x_chunks[:, i:i+chunk_batch_size, :, :]
                 current_step = x_i.shape[1]
-    
+
                 # Fusion des dimensions Batch et Chunks pour le passage dans le modèle
                 # Shape finale attendue par HF : [B * current_step, ctx_len, C]
                 x_i_flat = x_i.reshape(B * current_step, C, ctx_len).transpose(1, 2)
