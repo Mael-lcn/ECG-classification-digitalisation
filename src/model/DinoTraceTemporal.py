@@ -115,6 +115,9 @@ class DinoTraceTemporal(nn.Module):
         """
         B, I, C, H, W = x.shape
 
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+
         # Aplatissement 5D -> 4D pour traitement indépendant de chaque image par le ViT
         x_flat = x.view(B * I, C, H, W)
 

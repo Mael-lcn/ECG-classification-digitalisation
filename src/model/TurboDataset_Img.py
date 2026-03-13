@@ -36,5 +36,4 @@ class TurboDataset_Img(TurboDataset):
             indices = torch.arange(batch_images.shape[1]).expand(batch_images.shape[0], -1)
             mask_images = indices >= num_windows.unsqueeze(1)
 
-            # On transforme [0, 255] en [0.0, 1.0] float32
-            yield batch_images.float() / 255.0, batch_y, mask_images
+            yield batch_images, batch_y, mask_images

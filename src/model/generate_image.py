@@ -95,60 +95,73 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
         torch.Tensor: Tenseur optimise contenant douze canaux separes par fenetre.
     """
     # 1. Mise en forme des signaux
-    tracings = torch.transpose(tracings, 1, 2)
     batch_size, channels, time_steps = tracings.shape
 
-    # Padding si necessaire
+    # Padding temporel si le signal ne tombe pas juste
     pad_len = (segment_size - (time_steps % segment_size)) % segment_size
     if pad_len > 0:
+        # Pad la dernière dimension (Time)
         tracings = F.pad(tracings, (0, pad_len), mode='constant', value=0.0)
 
+    # Fenêtrage (unfold) sur l'axe du temps (dim=2) -> Shape: (B, 12, N, S)
     segments = tracings.unfold(2, segment_size, segment_size)
-    segments_np = segments.numpy()
-    batch_size, channels, num_segments, seq_len = segments_np.shape 
+    
+    segments_np = segments.transpose(1, 2).numpy()
 
-    # 2. Filtrage median vectorise
+    batch_size, num_segments, channels, seq_len = segments_np.shape 
+
+    # 2. Filtrage moy
     kernel_size = int(seq_len * 0.05) | 1 
-    baseline = scipy.ndimage.median_filter(segments_np, size=(1, 1, 1, kernel_size))
+    # Le filtre s'applique toujours sur la dernière dimension (seq_len)
+    baseline = scipy.ndimage.uniform_filter1d(segments_np, size=kernel_size, axis=-1)
     sig_clean = segments_np - baseline
 
     # 3. Auto-Scale dynamique
-    max_amp = np.max(np.abs(sig_clean), axis=(2, 3), keepdims=True)
+    # On calcule le max sur les segments (axe 1) et le temps (axe 3) 
+    # pour avoir 1 scale par canal pour tout le patient. -> Shape: (B, 1, 12, 1)
+    max_amp = np.max(np.abs(sig_clean), axis=(1, 3), keepdims=True)
     scale_y_dynamic = (h * 0.4) / (max_amp + 1e-6)
 
-    # 4. Pre-calcul des coordonnees (precision sous-pixel)
+    # 4. Pré-calcul vectorisé des coordonnées
     shift = 4
     mult = 16
-    x_coords = np.linspace(0, (w - 1) * mult, seq_len).astype(np.int32)
     
+    # Calcul des Y : Broadcasting direct sans aucune boucle
     y_coords_float = (h / 2.0) - (sig_clean * scale_y_dynamic)
     np.clip(y_coords_float, 0, h - 1, out=y_coords_float) 
-    y_coords = (y_coords_float * mult).astype(np.int32)
-    y_coords = np.transpose(y_coords, (0, 2, 1, 3))
+    y_coords = (y_coords_float * mult).astype(np.int32) # Shape: (B, N, 12, S)
 
-    # --- OPTIMISATION MEMOIRE : Allocation en uint8 ---
+    # --- OPTIMISATION OPENCV (Vectorisation "Canvas Empilé") ---
+    total_images = batch_size * num_segments
+    
+    # On fusionne Batch et Segments: (Total_images, 12, S)
+    y_coords_flat = y_coords.reshape(total_images, 12, seq_len)
+    
+    # Décalage vertical mathématique pour empiler les 12 dérivations
+    offsets = (np.arange(12) * h * mult).reshape(1, 12, 1)
+    y_coords_offset = y_coords_flat + offsets
+
+    # Préparation des X (identiques partout)
+    x_coords = np.linspace(0, (w - 1) * mult, seq_len).astype(np.int32)
+    
+    # Structure attendue par OpenCV : (Total_images, 12 courbes, seq_len, 1 point, 2 coords)
+    pts_all = np.empty((total_images, 12, seq_len, 1, 2), dtype=np.int32)
+    pts_all[..., 0, 0] = x_coords
+    pts_all[..., 0, 1] = y_coords_offset
+
+    # 5. Allocation et Dessin
     output_images_np = np.zeros((batch_size, num_segments, 12, h, w), dtype=np.uint8)
     
-    pts = np.empty((seq_len, 1, 2), dtype=np.int32)
-    pts[:, 0, 0] = x_coords
-    
-    # Canvas temporaire en uint8
-    img_channel = np.empty((h, w), dtype=np.uint8)
+    # On crée une "fenêtre virtuelle" qui fait 12 fois la hauteur
+    canvas_view = output_images_np.reshape(total_images, 12 * h, w)
 
-    # 5. Boucle de dessin
-    for b in range(batch_size):
-        for n in range(num_segments):
-            for i in range(12):
-                pts[:, 0, 1] = y_coords[b, n, i]
-                img_channel.fill(0)
-                
-                # Dessin en blanc (255) sur fond noir (0)
-                cv2.polylines(img_channel, [pts], isClosed=False, color=255, 
-                              thickness=1, lineType=cv2.LINE_8, shift=shift)
-                
-                output_images_np[b, n, i] = img_channel
+    # BOUCLE DRASTIQUEMENT RÉDUITE
+    for j in range(total_images):
+        # OpenCV reçoit une liste de 12 tracés d'un coup (écrit en C++, c'est ultra-rapide).
+        # Comme on a décalé les Y, OpenCV dessine les 12 canaux au bon endroit en 1 seule passe.
+        cv2.polylines(canvas_view[j], list(pts_all[j]), isClosed=False, color=255, 
+                      thickness=1, lineType=cv2.LINE_8, shift=shift)
 
-    # Retourne un ByteTensor (uint8)
     return torch.from_numpy(output_images_np)
 
 
@@ -157,7 +170,7 @@ if __name__ == "__main__":
     file_path = "../../../output/normalize_data/georgia.hdf5"
 
     with h5py.File(file_path, 'r') as f:
-        tracings = torch.from_numpy(f['tracings'][:10]).permute(0, 2, 1)
+        tracings = torch.from_numpy(f['tracings'][:10])
 
     images_tensor = create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000)
 
@@ -167,9 +180,9 @@ if __name__ == "__main__":
     os.makedirs("../../../output/img/", exist_ok=True)
 
     for i in range(min(5, flat_images.size(0))):
-        grid_input = flat_images[i].unsqueeze(1) 
-        vutils.save_image(grid_input, f"../../../output/img/check_dino_12channels_{i}.png", nrow=4, normalize=False)
+        grid_input = flat_images[i].unsqueeze(1).float() / 255.0
 
+        vutils.save_image(grid_input, f"../../../output/img/check_dino_12channels_{i}.png", nrow=4, normalize=False)
 
     """
     images_tensor = create_image_12leads_together(tracings, h=518, w=518)

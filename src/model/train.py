@@ -33,10 +33,6 @@ import warnings
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
 
-require_compile = set(['PatchTSTModel', 'DinoTraceTemporal'])
-required_image = set(['DinoTraceTemporal'])
-
-
 def generate_exp_name(args, valid_kwargs, wandb_id):
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
     exp_parts = [args.model_name, pad_status]
@@ -407,7 +403,7 @@ def run(args, Dataset_fun):
 
     # Compilation PyTorch 2.0
     try:
-        if model_name in require_compile or args.use_static_padding:
+        if model_name in set(['PatchTSTModel', 'DinoTraceTemporal']) or args.use_static_padding:
             model = torch.compile(model)
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
@@ -639,6 +635,7 @@ def main():
 
     args = parser.parse_args()
 
+    required_image = set(['DinoTraceTemporal'])
 
     if args.model_name in required_image:
         Dataset_fun = TurboDataset_Img
