@@ -32,9 +32,9 @@ import warnings
 # On dit à Python tkt c'est pas grave pour ce warning précis
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
-# Supprime la limite de recompilation pour éviter les crashs avec torch.compile
-#torch._dynamo.config.recompile_limit = 6000
-torch._dynamo.config.cache_size_limit = 6000
+
+require_compile = set(['PatchTSTModel', 'DinoTraceTemporal'])
+required_image = set(['DinoTraceTemporal'])
 
 
 def generate_exp_name(args, valid_kwargs, wandb_id):
@@ -407,7 +407,7 @@ def run(args, Dataset_fun):
 
     # Compilation PyTorch 2.0
     try:
-        if args.use_static_padding:
+        if model_name in require_compile or args.use_static_padding:
             model = torch.compile(model)
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
@@ -639,7 +639,6 @@ def main():
 
     args = parser.parse_args()
 
-    required_image = set(['DinoTraceTemporal'])
 
     if args.model_name in required_image:
         Dataset_fun = TurboDataset_Img
