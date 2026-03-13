@@ -6,6 +6,7 @@ import time
 import math
 from tqdm import tqdm
 import glob
+import shutil
 
 import wandb
 
@@ -298,7 +299,7 @@ def run(args):
 
     # 4. Créer le model
     print(f"[INIT] Instanciation du modèle {args.model_name}...")
-    model, valid_kwargs = build_model(args)
+    model, valid_kwargs, model_name = build_model(args)
     model = model.to(device)
 
     # 5. Génération du nom d'expérience dynamique
@@ -309,7 +310,7 @@ def run(args):
         project="ECG_Classification_Experiments",
         group=exp_name,
         job_type="train",
-        name=f"run_{wandb_id[:6]}",
+        name=f"run_{model_name}_{wandb_id[:6]}",
         config=args,
         id=wandb_id,
         resume=resume_mode,
@@ -507,15 +508,23 @@ def run(args):
     final_model_files = glob.glob(search_pattern)
 
     if final_model_files:
-        model_path = final_model_files[0] # Normalement il n'y en a qu'un seul grâce au nettoyage
-        print(f"[WANDB] Fichier trouvé : {os.path.basename(model_path)}")
+        model_path = final_model_files[0] 
+        nom_fichier = os.path.basename(model_path)
+        print(f"[WANDB] Fichier trouvé sur le cluster : {nom_fichier}")
 
-        # Création et upload de l'artefact
-        artifact_name = f"model-{wandb.run.id}"
+        # 1. On copie le modèle DANS le dossier interne du run W&B
+        wandb_internal_path = os.path.join(wandb.run.dir, nom_fichier)
+        shutil.copy2(model_path, wandb_internal_path)
+
+        # 2. Création et upload de l'artefact à partir de cette copie interne
+        artifact_name = f"model-{model_name}-{wandb.run.id}"
         artifact = wandb.Artifact(artifact_name, type='model')
-        artifact.add_file(model_path)
+
+        # On ajoute le fichier interne, avec son nom propre
+        artifact.add_file(wandb_internal_path, name=nom_fichier)
         wandb.log_artifact(artifact)
-        print("[WANDB] Upload terminé avec succès.")
+
+        print("[WANDB] Upload préparé avec succès pour la synchro locale.")
     else:
         print(f"[WANDB] ERREUR : Aucun modèle trouvé pour le pattern {search_pattern}")
 

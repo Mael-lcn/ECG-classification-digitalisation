@@ -105,4 +105,4 @@ def build_model(args_namespace):
     valid_kwargs = {k: v for k, v in args_dict.items() if k in sig.parameters}
 
     print(f"Le modèle: {model_name} à bien été instancié")
-    return ModelClass(**valid_kwargs), valid_kwargs
+    return ModelClass(**valid_kwargs), valid_kwargs, model_name

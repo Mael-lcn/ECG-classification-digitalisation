@@ -1,4 +1,4 @@
-import os
+import os, shutil
 import sys
 import json
 import argparse
@@ -20,7 +20,7 @@ from model_factory import get_shared_parser, build_model
 
 
 
-#torch.set_float32_matmul_precision('high')  # Test d'optimisation
+torch.set_float32_matmul_precision('high')  # Test d'optimisation
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
 torch._dynamo.config.recompile_limit = 6000
 
@@ -300,7 +300,7 @@ def main():
     )
 
     parser.add_argument('--data', default="../../../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('-c', '--checkpoint', default="best_model_ep49.pt", help="Trained model checkpoint")
+    parser.add_argument('-c', '--checkpoint', required=True, help="Trained model checkpoint")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
 
     parser.add_argument('--threshold', type=float, default=0.5)
@@ -324,6 +324,8 @@ def main():
 
 
     # ================= CONFIGURATION WANDB =================
+    wandb_id = wandb.util.generate_id()
+
     os.makedirs(args.output, exist_ok=True)
     os.environ["WANDB_MODE"] = "offline"
     # On prend le dossier parent de output
@@ -331,20 +333,18 @@ def main():
     os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
     os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
 
-    # Extraction du nom de fichier depuis le chemin complet
-    checkpoint_basename = args.checkpoint_dir
-
-    # Retrouver le nom de l'expérience
-    group_id = checkpoint_basename.split('_ep')[0].replace('best_model_', '')
+    # Récupère le nom du groups
+    group_id = args.checkpoint.split('_ep')[0].replace('best_model_', '')
 
     wandb.init(
         project="ECG_Classification_Experiments",
         group=group_id,
         job_type="eval",
-        name=f"test_{args.model_name}_thr{args.threshold}",
+        name=f"test_{args.model_name}_{wandb_id[:6]}",
+        id=wandb_id,
         config={
             "eval_threshold": args.threshold,
-            "checkpoint_source": checkpoint_basename,
+            "checkpoint_source": args.checkpoint,
             "test_batch_size": args.batch_size,
             "use_static_padding": args.use_static_padding,
             "model_tested": args.model_name
@@ -352,7 +352,7 @@ def main():
         tags=["eval", "final_test", args.model_name, "offline"]
     )
 
-    print(f"Début de l'évaluation : {checkpoint_basename}")
+    print(f"Début de l'évaluation : {args.checkpoint}")
 
     # ================= DATASET & DATALOADER =================
     mb_size = args.batch_size * args.mega_batch_factor
@@ -440,20 +440,10 @@ def main():
         class_table.add_data(cls, f1_val, auroc_val, auprc_val, sens_val, spec_val)
     wandb.log({"eval/per_class_metrics": class_table})
 
-    # Finish BEFORE artifact upload
-    wandb.finish()
 
-    # Artifact upload 
-    try:
-        artifact = wandb.Artifact(f"eval-{wandb.run.id}", type="evaluation")
-        if os.path.exists(args.checkpoint_dir):
-            artifact.add_file(args.checkpoint)
-        wandb.log_artifact(artifact)
-    except Exception as e:
-        print(f"[WARN] Artifact upload skipped: {e}")
-
-    # ================= SAVE CSV =================
-    name = args.checkpoint
+   # ================= SAVE CSV =================
+    # On nettoie le nom pour éviter l'extension .pt dans le nom du CSV
+    name = args.checkpoint.replace('.pt', '')
 
     output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:
@@ -474,6 +464,31 @@ def main():
             spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else 'nan'
             writer.writerow([cls, f1_val, auroc_val, auprc_val, sens_val, spec_val])
     print(f"Per-class metrics saved to {output_csv_per_class}")
+
+    # ================= ARTIFACT UPLOAD  =================
+    try:
+        # 1. Copier les CSV dans le dossier interne de W&B pour la synchro
+        csv_interne_1 = os.path.join(wandb.run.dir, os.path.basename(output_csv))
+        csv_interne_2 = os.path.join(wandb.run.dir, os.path.basename(output_csv_per_class))
+        shutil.copy2(output_csv, csv_interne_1)
+        shutil.copy2(output_csv_per_class, csv_interne_2)
+
+        # 2. Créer l'artefact (type "evaluation-data" pour séparer des modèles)
+        artifact = wandb.Artifact(f"eval-results-{wandb.run.id}", type="evaluation-data")
+
+        # 3. Ajouter les copies internes à l'artefact
+        artifact.add_file(csv_interne_1, name=os.path.basename(output_csv))
+        artifact.add_file(csv_interne_2, name=os.path.basename(output_csv_per_class))
+
+        # On log l'artefact sur W&B
+        wandb.log_artifact(artifact)
+        print("[WANDB] Résultats CSV ajoutés aux artefacts avec succès.")
+    except Exception as e:
+        print(f"[WARN] Artifact upload skipped/failed: {e}")
+
+    # On clôture le run W&B seulement une fois que TOUT est loggué et sauvegardé
+    wandb.finish()
+
 
 
 if __name__ == "__main__":
