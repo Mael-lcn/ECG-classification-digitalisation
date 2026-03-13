@@ -151,14 +151,11 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
 
     # 5. Allocation et Dessin
     output_images_np = np.zeros((batch_size, num_segments, 12, h, w), dtype=np.uint8)
-    
+
     # On crée une "fenêtre virtuelle" qui fait 12 fois la hauteur
     canvas_view = output_images_np.reshape(total_images, 12 * h, w)
 
-    # BOUCLE DRASTIQUEMENT RÉDUITE
     for j in range(total_images):
-        # OpenCV reçoit une liste de 12 tracés d'un coup (écrit en C++, c'est ultra-rapide).
-        # Comme on a décalé les Y, OpenCV dessine les 12 canaux au bon endroit en 1 seule passe.
         cv2.polylines(canvas_view[j], list(pts_all[j]), isClosed=False, color=255, 
                       thickness=1, lineType=cv2.LINE_8, shift=shift)
 

@@ -293,6 +293,9 @@ def run(args, Dataset_fun):
 
     # 1. Configuration Matérielle
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
         device = torch.device("cuda")
         use_amp = not args.not_use_amp
         torch.backends.cudnn.benchmark = args.use_static_padding

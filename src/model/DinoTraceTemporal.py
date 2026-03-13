@@ -33,7 +33,7 @@ class DinoTraceTemporal(nn.Module):
         D_dropout_classifier = 0.3,
         D_max_images = 20,
         unfreeze_blocks = 2,
-        sub_batch_size = 4
+        sub_batch_size = 32
     ):
         """
         Initialise le modèle DinoTraceTemporal.
@@ -115,9 +115,6 @@ class DinoTraceTemporal(nn.Module):
         """
         B, I, C, H, W = x.shape
 
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-
         # Aplatissement 5D -> 4D pour traitement indépendant de chaque image par le ViT
         x_flat = x.view(B * I, C, H, W)
 
@@ -126,6 +123,9 @@ class DinoTraceTemporal(nn.Module):
         # --- Phase 1 : backbone ---
         for i in range(0, B * I, self.sub_batch_size):
             chunk = x_flat[i : i + self.sub_batch_size]
+
+            if chunk.dtype == torch.uint8:
+                chunk = chunk.float() / 255.0
 
             # Adaptation spatiale
             chunk = self.adapter(chunk)
