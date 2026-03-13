@@ -33,7 +33,7 @@ class DinoTraceTemporal(nn.Module):
         D_dropout_classifier = 0.3,
         D_max_images = 20,
         unfreeze_blocks = 2,
-        sub_batch_size = 64*4
+        sub_batch_size = 4
     ):
         """
         Initialise le modèle DinoTraceTemporal.
@@ -100,7 +100,7 @@ class DinoTraceTemporal(nn.Module):
             nn.Linear(D_hidden_dim, num_classes)
         )
 
-    def forward(self, x, mask = None):
+    def forward(self, x, batch_mask=None):
         """
         Passe avant du modèle avec gestion sécurisée de la mémoire (Anti-OOM).
 
@@ -141,7 +141,7 @@ class DinoTraceTemporal(nn.Module):
         features = features + self.pos_embedding[:, :I, :]
 
         # Attention croisée temporelle (ignore les images vides via le src_key_padding_mask)
-        temporal_out = self.temporal_transformer(features, src_key_padding_mask=mask)
+        temporal_out = self.temporal_transformer(features, src_key_padding_mask=batch_mask)
 
         # --- Phase 3 : Agégation et classification ---
         final_rep, _ = torch.max(temporal_out, dim=1)

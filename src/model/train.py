@@ -36,6 +36,7 @@ warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 #torch._dynamo.config.recompile_limit = 6000
 torch._dynamo.config.cache_size_limit = 6000
 
+
 def generate_exp_name(args, valid_kwargs, wandb_id):
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
     exp_parts = [args.model_name, pad_status]
@@ -70,6 +71,7 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
 
     exp_parts.append(wandb_id[:6])
     return "_".join(exp_parts)
+
 
 def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device) -> torch.Tensor | None:
     """
@@ -108,6 +110,7 @@ def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device
     print(f"    Min   : {pw.min():.4f}  |  Max : {pw.max():.4f}  |  Mean : {pw.mean():.4f}")
 
     return pw.to(device)
+
 
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
     """
@@ -269,7 +272,7 @@ def run(args, Dataset_fun):
         device = torch.device("cuda")
         use_amp = not args.not_use_amp
         torch.backends.cudnn.benchmark = args.use_static_padding
-        print("[INIT] Mode: CUDA")
+        print(f"[INIT] Mode: CUDA AMP is {use_amp}")
     else:
         device = torch.device("cpu")
         use_amp = False

@@ -94,11 +94,11 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
     Returns:
         torch.Tensor: Tenseur optimise contenant douze canaux separes par fenetre.
     """
-    # Ajustement des dimensions initiales
+    # 1. Mise en forme des signaux
     tracings = torch.transpose(tracings, 1, 2)
     batch_size, channels, time_steps = tracings.shape
 
-    # Ajout de zeros pour completer la derniere fenetre si necessaire normalement impossible
+    # Padding si necessaire
     pad_len = (segment_size - (time_steps % segment_size)) % segment_size
     if pad_len > 0:
         tracings = F.pad(tracings, (0, pad_len), mode='constant', value=0.0)
@@ -107,60 +107,48 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
     segments_np = segments.numpy()
     batch_size, channels, num_segments, seq_len = segments_np.shape 
 
-    # Filtrage median vectorise de la ligne de base
+    # 2. Filtrage median vectorise
     kernel_size = int(seq_len * 0.05) | 1 
     baseline = scipy.ndimage.median_filter(segments_np, size=(1, 1, 1, kernel_size))
     sig_clean = segments_np - baseline
 
-    # Mise a l'echelle dynamique automatique
+    # 3. Auto-Scale dynamique
     max_amp = np.max(np.abs(sig_clean), axis=(2, 3), keepdims=True)
     scale_y_dynamic = (h * 0.4) / (max_amp + 1e-6)
 
-    # Anticipation des coordonnees avec une precision sous-pixel
+    # 4. Pre-calcul des coordonnees (precision sous-pixel)
     shift = 4
     mult = 16
-
-    # Les abscisses restent identiques pour tous les signaux
     x_coords = np.linspace(0, (w - 1) * mult, seq_len).astype(np.int32)
-
-    # Calcul des ordonnees
+    
     y_coords_float = (h / 2.0) - (sig_clean * scale_y_dynamic)
-
-    # Limitation des valeurs directement en memoire pour la performance
     np.clip(y_coords_float, 0, h - 1, out=y_coords_float) 
     y_coords = (y_coords_float * mult).astype(np.int32)
-
-    # Reorganisation spatiale pour accelerer la lecture en boucle
     y_coords = np.transpose(y_coords, (0, 2, 1, 3))
 
-    # Allocation memoire unique et prealable
-    output_images_np = np.zeros((batch_size, num_segments, 12, h, w), dtype=np.float32)
-
-    # Preparation du conteneur de points pour la bibliotheque de dessin
+    # --- OPTIMISATION MEMOIRE : Allocation en uint8 ---
+    output_images_np = np.zeros((batch_size, num_segments, 12, h, w), dtype=np.uint8)
+    
     pts = np.empty((seq_len, 1, 2), dtype=np.int32)
     pts[:, 0, 0] = x_coords
+    
+    # Canvas temporaire en uint8
+    img_channel = np.empty((h, w), dtype=np.uint8)
 
-    # Preparation de la toile vierge
-    img_channel = np.empty((h, w), dtype=np.float32)
-
-    # Iterations de rasterisation optimisees
+    # 5. Boucle de dessin
     for b in range(batch_size):
         for n in range(num_segments):
             for i in range(12):
-                # Seules les ordonnees necessitent une mise a jour
                 pts[:, 0, 1] = y_coords[b, n, i]
-
-                # Remise a zero de la toile sans nouvelle allocation
                 img_channel.fill(0)
-
-                # Trace direct avec des aretes nettes sans anticrenelage pour un format binaire
-                cv2.polylines(img_channel, [pts], isClosed=False, color=1.0, 
+                
+                # Dessin en blanc (255) sur fond noir (0)
+                cv2.polylines(img_channel, [pts], isClosed=False, color=255, 
                               thickness=1, lineType=cv2.LINE_8, shift=shift)
-
-                # Insertion du resultat dans le tenseur final
+                
                 output_images_np[b, n, i] = img_channel
 
-    # Conversion differee vers le format tenseur final
+    # Retourne un ByteTensor (uint8)
     return torch.from_numpy(output_images_np)
 
 
