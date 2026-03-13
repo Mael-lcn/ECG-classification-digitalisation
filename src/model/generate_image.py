@@ -122,14 +122,14 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
 
     # Les abscisses restent identiques pour tous les signaux
     x_coords = np.linspace(0, (w - 1) * mult, seq_len).astype(np.int32)
-    
+
     # Calcul des ordonnees
     y_coords_float = (h / 2.0) - (sig_clean * scale_y_dynamic)
-    
+
     # Limitation des valeurs directement en memoire pour la performance
     np.clip(y_coords_float, 0, h - 1, out=y_coords_float) 
     y_coords = (y_coords_float * mult).astype(np.int32)
-    
+
     # Reorganisation spatiale pour accelerer la lecture en boucle
     y_coords = np.transpose(y_coords, (0, 2, 1, 3))
 

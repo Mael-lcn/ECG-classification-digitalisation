@@ -5,7 +5,7 @@ from generate_image import create_image_12leads_perchan
 
 
 
-class DinoImageDataset(TurboDataset):
+class TurboDataset_Img(TurboDataset):
     """
     Dataset hérité pour la génération à la volée d'images ECG pour DINOv2.
     

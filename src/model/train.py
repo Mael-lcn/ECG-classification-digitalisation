@@ -1,5 +1,4 @@
 import os, sys
-import json
 import argparse
 import re
 import time
@@ -16,6 +15,9 @@ import torch.optim as optim
 import torch._dynamo
 from torch.utils.data import DataLoader
 
+ # All dataset handler
+from TurboDataset import TurboDataset
+from TurboDataset_Img import TurboDataset_Img
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
@@ -240,7 +242,7 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
 
 
 
-def run(args):
+def run(args, Dataset_fun):
     """
     Orchestre le cycle de vie complet de l'expérience d'entraînement (Pipeline principal).
 
@@ -333,7 +335,7 @@ def run(args):
     mb_size = args.batch_size * args.mega_batch_factor
 
     # Création du Dataset d'entraînement
-    train_ds = TurboDataset(
+    train_ds = Dataset_fun(
         data_path=args.train_data,
         batch_size=args.batch_size,
         mega_batch_size=mb_size,
@@ -341,7 +343,7 @@ def run(args):
     )
 
     # Création du Dataset de validation
-    val_ds = TurboDataset(
+    val_ds = Dataset_fun(
         data_path=args.val_data, 
         batch_size=args.batch_size,
         mega_batch_size=mb_size,
@@ -572,10 +574,17 @@ def main():
 
     args = parser.parse_args()
 
+    required_image = set(['DinoTraceTemporal'])
+
+    if args.model_name in required_image:
+        Dataset_fun = TurboDataset_Img
+    else:
+        Dataset_fun = TurboDataset
+
     # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-    run(args)
+    run(args, Dataset_fun)
 
 
 if __name__ == "__main__":

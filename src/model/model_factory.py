@@ -2,9 +2,12 @@ import argparse
 import inspect
 import multiprocessing
 
+
+# All models
 from Cnn import CNN
 from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
+from DinoTraceTemporal import DinoTraceTemporal 
 
 
 
@@ -12,7 +15,8 @@ from PatchTST_CrossAtt import PatchTST_CrossAtt
 MODEL_REGISTRY = {
     "cnn_base": CNN,
     "cnn_spectro": CNN_TimeFreq,
-    "PatchTSTModel": PatchTST_CrossAtt
+    "PatchTSTModel": PatchTST_CrossAtt,
+    "DinoTraceTemporal": DinoTraceTemporal
 }
 
 
