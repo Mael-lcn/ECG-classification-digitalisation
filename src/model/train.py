@@ -41,7 +41,7 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
     pad_status = "UnivPad" if args.use_static_padding else "MaxPad"
     exp_parts = [args.model_name, pad_status]
 
-    exp_parts.append(f"bs{args.batch_size}")
+    exp_parts.append(f"bs{args.batch_size_theoric}")
     exp_parts.append(f"lr{args.lr}")
 
     amp_status = "AMP_F" if args.not_use_amp else "AMP_T"
@@ -112,68 +112,96 @@ def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device
     return pw.to(device)
 
 
-def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
+def train_one_epoch(
+    model, 
+    dataloader, 
+    optimizer, 
+    criterion, 
+    scaler, 
+    device, 
+    epoch, 
+    total_epochs, 
+    use_amp, 
+    batch_size_theoric=64, 
+    batch_size_accumulat=64
+):
     """
-    Exécute une époque d'entraînement complète avec tolérance aux pannes numériques.
+    Exécute une époque d'entraînement avec accumulation de gradients (Gradient Accumulation).
 
-    Cette fonction itère sur le DataLoader, effectue les passes avant/arrière et met à jour les poids.
-    Elle intègre une gestion robuste des erreurs : si une perte (Loss) devient NaN ou Inf, 
-    le batch incriminé est ignoré et consigné dans un rapport d'erreur WandB, évitant ainsi 
-    le crash complet de l'entraînement.
+    Cette stratégie permet de simuler un batch_size important (batch_size_theoric) en 
+    effectuant plusieurs passes avant/arrière sur des micro-batchs plus petits 
+    (batch_size_accumulat) qui tiennent en VRAM. Les poids ne sont mis à jour qu'une 
+    fois le batch théorique complété.
 
     Args:
         model (nn.Module): Le réseau de neurones à entraîner.
-        dataloader (DataLoader): Le chargeur de données (doit renvoyer tracings, targets, lengths).
+        dataloader (DataLoader): Le chargeur de données (renvoie tracings, targets, batch_mask).
         optimizer (torch.optim.Optimizer): L'optimiseur (ex: AdamW).
         criterion (nn.Module): La fonction de perte (ex: BCEWithLogitsLoss).
-        scaler (torch.amp.GradScaler | None): Scaler pour la gestion de la précision mixte (AMP).
-            Si None, l'entraînement se fait en précision standard (FP32).
-        device (torch.device): Le périphérique de calcul (CPU ou CUDA).
-        epoch (int): L'index de l'époque courante (pour l'affichage/logging).
-        total_epochs (int): Nombre total d'époques prévues.
-        use_amp (bool): Indique si l'Automatic Mixed Precision est activée.
+        scaler (torch.amp.GradScaler | None): Scaler pour la précision mixte (AMP).
+        device (torch.device): Le périphérique de calcul (CUDA).
+        epoch (int): Index de l'époque actuelle.
+        total_epochs (int): Nombre total d'époques.
+        use_amp (bool): Activation de l'Automatic Mixed Precision.
+        batch_size_theoric (int): Taille de batch effective souhaitée pour l'optimisation.
+        batch_size_accumulat (int): Taille de batch physique réellement envoyée au GPU.
 
     Returns:
-        float: La perte moyenne de l'époque. Retourne `float('inf')` si tous les batchs 
-        de l'époque ont échoué (cas critique).
+        float: La perte moyenne de l'époque.
     """
     model.train()
+
+    # Calcul du nombre d'itérations nécessaires pour atteindre le batch théorique
+    accumulation_steps = max(1, batch_size_theoric // batch_size_accumulat)
 
     loop = tqdm(dataloader, desc=f"Ep {epoch}/{total_epochs} [TRAIN]", dynamic_ncols=False)
     total_loss = 0
     count = 0
 
-    for batch in loop:
+    # Initialisation propre des gradients
+    optimizer.zero_grad(set_to_none=True)
+
+    for i, batch in enumerate(loop):
         tracings, targets, batch_mask = batch
         tracings = tracings.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         batch_mask = batch_mask.to(device, non_blocking=True)
 
-        optimizer.zero_grad(set_to_none=True)
-
-        # Forward Pass
+        # 1. Forward Pass avec AMP
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
             predictions = model(tracings, batch_mask=batch_mask)
-            loss = criterion(predictions, targets)
+    
+            # Important : On divise la loss par accumulation_steps car backward() 
+            # additionne les gradients. Cette division garantit que le gradient 
+            # final correspond à la moyenne sur batch_size_theoric.
+            loss = criterion(predictions, targets) / accumulation_steps
 
-        # Backward Pass
+        # 2. Backward Pass (Accumulation automatique dans les buffers de gradients)
         if scaler:
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
         else:
             loss.backward()
-            optimizer.step()
 
-        # Logging
-        loss_val = loss.item()
+        # 3. Step d'optimisation (Uniquement quand on a accumulé assez de gradients)
+        if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
+            if scaler:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
+            # Reset des gradients pour le prochain cycle d'accumulation
+            optimizer.zero_grad(set_to_none=True)
+
+        # 4. Logging (On affiche la loss réelle, donc multipliée par accumulation_steps)
+        loss_val = loss.item() * accumulation_steps
 
         if math.isfinite(loss_val):
             total_loss += loss_val
             count += 1
             loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{total_loss/count:.4f}")
         else:
-            # Enregistrement des preuves pour debug
+            # Diagnostic en cas de divergence (NaN/Inf)
             try:
                 crash_table = wandb.Table(
                     columns=["Epoch", "Batch", "Loss", "Targets Sample"],
@@ -183,7 +211,6 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
             except Exception:
                 pass
 
-    # Retourne la moyenne ou l'infini si tout a échoué
     return total_loss / count if count > 0 else float('inf')
 
 
@@ -335,12 +362,12 @@ def run(args, Dataset_fun):
     print(f"[INIT] Préparation des TurboDatasets (Format .npy)...")
 
     # Création du Dataset d'entraînement
-    mb_size = args.batch_size * args.mega_batch_factor
+    mb_size = args.batch_size_theoric * args.mega_batch_factor
 
     # Création du Dataset d'entraînement
     train_ds = Dataset_fun(
         data_path=args.train_data,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size_accumulat,
         mega_batch_size=mb_size,
         use_static_padding=args.use_static_padding
     )
@@ -348,7 +375,7 @@ def run(args, Dataset_fun):
     # Création du Dataset de validation
     val_ds = Dataset_fun(
         data_path=args.val_data, 
-        batch_size=args.batch_size,
+        batch_size=args.batch_size_accumulat,
         mega_batch_size=mb_size,
         use_static_padding=args.use_static_padding
     )
@@ -433,7 +460,7 @@ def run(args, Dataset_fun):
         # A. Train
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, 
-            scaler_amp, device, epoch, args.epochs, use_amp
+            scaler_amp, device, epoch, args.epochs, use_amp, args.batch_size_theoric, args.batch_size_accumulat
         )
 
         # Calcul temps & débit
