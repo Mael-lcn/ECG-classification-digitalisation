@@ -43,6 +43,7 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
 
     exp_parts.append(f"bs{args.batch_size_theoric}")
     exp_parts.append(f"lr{args.lr}")
+    exp_parts.append(f"backbone_lr{args.backbone_lr}")
 
     amp_status = "AMP_F" if args.not_use_amp else "AMP_T"
     exp_parts.append(amp_status)
@@ -411,8 +412,39 @@ def run(args, Dataset_fun):
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    
+
+    # On sépare les paramètres en deux groupes
+    backbone_params = []
+    head_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # On identifie les paramètres du backbone par leur nom
+        if "backbone" in name:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    # Configuration des groupes pour l'optimiseur
+    param_groups = [
+        {
+            "params": backbone_params, 
+            "lr": args.backbone_lr,
+            "name": "backbone"
+        },
+        {
+            "params": head_params, 
+            "lr": args.lr, # LR plein pour les nouvelles couches
+            "name": "head"
+        }
+    ]
+
+    print(f"[INIT] Params Backbone: {len(backbone_params)} | Params Head: {len(head_params)}")
+    print(f"[INIT] Backbone LR Factor: {args.backbone_lr}")
+
+    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
+
     # MODIFIED: Build criterion with optional pos_weight
     pos_weight_tensor = load_pos_weight(
         pos_weight_path=args.pos_weight_path,
@@ -586,7 +618,10 @@ def main():
     # Hyperparamètres
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
+    parser.add_argument('--backbone_lr', type=float, default=1e-6, help="Learning Rate initial for the backbone")
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help="pénaliter pour la régularisation du model")
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
+
 
     # Arguments Système
     parser.add_argument('--resume_from', type=str, default=None, 

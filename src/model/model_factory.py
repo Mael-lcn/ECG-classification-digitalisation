@@ -32,7 +32,7 @@ def get_shared_parser():
 
     group_sys.add_argument('--class_map', type=str, default='../../ressources/final_class.json',
                            help="Chemin JSON mappant les indices aux noms de classes")    
-    group_sys.add_argument('--workers', type=int, default=min(4, multiprocessing.cpu_count()-1),
+    group_sys.add_argument('--workers', type=int, default=min(2, multiprocessing.cpu_count()-1),
                            help="Nombre de processus pour charger les données")
 
     # --- 2. Choix du modèle ---
