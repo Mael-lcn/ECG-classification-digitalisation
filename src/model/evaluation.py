@@ -345,7 +345,7 @@ def main():
         config={
             "eval_threshold": args.threshold,
             "checkpoint_source": args.checkpoint,
-            "test_batch_size": args.batch_size,
+            "test_batch_size": args.batch_size_theoric,
             "use_static_padding": args.use_static_padding,
             "model_tested": args.model_name
         },
@@ -355,12 +355,12 @@ def main():
     print(f"Début de l'évaluation : {args.checkpoint}")
 
     # ================= DATASET & DATALOADER =================
-    mb_size = args.batch_size * args.mega_batch_factor
+    mb_size = args.batch_size_theoric * args.mega_batch_factor
 
     # Création du Dataset d'entraînement
     test_ds = TurboDataset(
         data_path=args.data,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size_accumulat,
         mega_batch_size=mb_size,
         use_static_padding=args.use_static_padding
     )
@@ -378,7 +378,7 @@ def main():
 
 
     # ================= MODEL =================
-    model, valid_kwargs = build_model(args)
+    model, _ = build_model(args)
     model = model.to(device)
     checkpoint = torch.load(os.path.join(args.checkpoint_dir, args.checkpoint), map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
