@@ -1,0 +1,116 @@
+"""
+ViT building blocks used by both ViT_TimeFreq and ViT_Image (i haven't implemented yet)
+"""
+
+import torch
+import torch.nn as nn
+
+
+class PatchEmbed(nn.Module):
+    """
+    Splits a 2D feature map into non-overlapping patches and projects each patch to a dim_model-dimensional 
+    embedding vector.
+
+    Args:
+        in_channels: Number of input channels (leads for spectrogram, 12 if we use image as input)
+        patch_size: (freq_patch, time_patch) or (h_patch, w_patch)
+        dim_model: Output embedding dimension
+
+    Input: (batch, in_channels, H, W)
+    Output: (batch, num_patches, dim_model)
+    """
+
+    def __init__(self, in_channels: int, patch_size: tuple, dim_model: int):
+        super().__init__()
+        self.patch_size = patch_size
+
+        # Equivalent to manually splitting + linear projection but this way is GPU-efficient.
+        self.proj = nn.Conv2d(
+            in_channels, 
+            dim_model,
+            kernel_size=patch_size,
+            stride=patch_size
+        )
+        self.norm = nn.LayerNorm(dim_model)
+
+    def forward(self, x):
+        x = self.proj(x) # (batch, dim_model, H//ph, W//pw)
+        x = x.flatten(2) # (batch, dim_model, num_patches)
+        x = x.transpose(1, 2) # (batch, num_patches, dim_model)
+        x = self.norm(x)
+        return x
+
+
+class SelfAttention(nn.Module):
+    """
+    Scaled dot-product multi-head self-attention (Q, K, A)
+
+    Args:
+        dim_model   : Embedding dimension.
+        num_heads : Number of attention heads. dim_model % num_heads must == 0.
+        dropout   : Dropout on attention weights.
+
+    Input  : (batch, seq_len, dim_model)
+    Output : (batch, seq_len, dim_model)
+    """
+    def __init__(self, dim_model: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        assert dim_model % num_heads == 0, \
+            f"dim_model ({dim_model}) must be divisible by num_heads ({num_heads})"
+
+        self.num_heads = num_heads
+        self.head_dim  = dim_model // num_heads
+        self.scale     = self.head_dim ** -0.5
+
+        # Fusion of Q, K, V projections
+        self.qkv       = nn.Linear(dim_model, 3 * dim_model, bias=False)
+        self.proj      = nn.Linear(dim_model, dim_model)
+        self.attn_drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        batch, seq_len, dim_model = x.shape
+
+        qkv = self.qkv(x) # (batch, seq_len, 3*dim_model)
+        qkv = qkv.reshape(batch, seq_len, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4) # (3, batch, heads, seq_len, head_dim)
+        q, k, v = qkv.unbind(0) # each: (batch, heads, seq_len, head_dim)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale # (batch, heads, N, N)
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(batch, seq_len, dim_model) # (batch, seq_len, dim_model)
+        x = self.proj(x)
+        return x
+    
+
+class TransformerBlock(nn.Module):
+    """
+    Standard ViT encoder block
+
+    Args:
+        dim_model: Transformer embedding dimension
+        num_heads: Number of attention heads
+        mlp_ratio: MLP hidden dim = dim_model * mlp_ratio (4 is standard ViT)
+        dropout: Applied in both attention and MLP
+    """
+    def __init__(self, dim_model: int, num_heads: int,
+                 mlp_ratio: float = 4.0, dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim_model)
+        self.attn  = SelfAttention(dim_model, num_heads, dropout)
+        self.norm2 = nn.LayerNorm(dim_model)
+        mlp_dim = int(dim_model * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim_model, mlp_dim),
+            nn.GELU(), # Gaussian CDF smooth gradients for large number of layers....
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, dim_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        # Pre-norm is more stable than post-norm for small models trained from scratch
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
