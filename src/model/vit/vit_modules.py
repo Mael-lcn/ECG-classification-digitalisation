@@ -43,7 +43,7 @@ class PatchEmbed(nn.Module):
 
 class SelfAttention(nn.Module):
     """
-    Scaled dot-product multi-head self-attention (Q, K, A)
+    Scaled dot-product multi-head self-attention (Q, K, V)
 
     Args:
         dim_model   : Embedding dimension.
@@ -59,28 +59,33 @@ class SelfAttention(nn.Module):
             f"dim_model ({dim_model}) must be divisible by num_heads ({num_heads})"
 
         self.num_heads = num_heads
-        self.head_dim  = dim_model // num_heads
-        self.scale     = self.head_dim ** -0.5
+        self.head_dim = dim_model // num_heads # size of each head's subspace
+        self.scale = self.head_dim ** -0.5 # 1 / sqrt(head_dim), scale down the attention scores to avoid vanishing gradient
 
-        # Fusion of Q, K, V projections
-        self.qkv       = nn.Linear(dim_model, 3 * dim_model, bias=False)
-        self.proj      = nn.Linear(dim_model, dim_model)
-        self.attn_drop = nn.Dropout(dropout)
+        # concatenated along the last dimension and split it later (GPU efficiency)
+        self.qkv = nn.Linear(dim_model, 3 * dim_model, bias=False)
+        self.proj = nn.Linear(dim_model, dim_model) # mixes the isolated heads tgt
+        self.attn_drop = nn.Dropout(dropout) # applied on the attention weights 
 
     def forward(self, x):
-        batch, seq_len, dim_model = x.shape
+        batch, seq_len, dim_model = x.shape # seq_len = number of patches
 
         qkv = self.qkv(x) # (batch, seq_len, 3*dim_model)
+
+        # Splits the big vector into Q, K, V and further splits each into num_heads slices, 
+        # each head has its own head_dim-sized Q, K, V.
         qkv = qkv.reshape(batch, seq_len, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4) # (3, batch, heads, seq_len, head_dim)
         q, k, v = qkv.unbind(0) # each: (batch, heads, seq_len, head_dim)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale # (batch, heads, N, N)
-        attn = attn.softmax(dim=-1)
+        # dot product between every pair of patches that just gives us raw scores then scale
+        attn = (q @ k.transpose(-2, -1)) * self.scale # (batch, heads, seq_len, seq_len)
+        attn = attn.softmax(dim=-1) # applied on patch dimension (how much should patch i attend to patch j) 
         attn = self.attn_drop(attn)
 
+        # weighted sum of values for each patch, swap heads and seq_len and concatenate all heads back into one vector 
         x = (attn @ v).transpose(1, 2).reshape(batch, seq_len, dim_model) # (batch, seq_len, dim_model)
-        x = self.proj(x)
+        x = self.proj(x) # mixes the isolated heads tgt
         return x
     
 
