@@ -46,12 +46,12 @@ class SelfAttention(nn.Module):
     Scaled dot-product multi-head self-attention (Q, K, V)
 
     Args:
-        dim_model   : Embedding dimension.
-        num_heads : Number of attention heads. dim_model % num_heads must == 0.
-        dropout   : Dropout on attention weights.
+        dim_model: Embedding dimension.
+        num_heads: Number of attention heads. dim_model % num_heads must == 0.
+        dropout: Dropout on attention weights.
 
-    Input  : (batch, seq_len, dim_model)
-    Output : (batch, seq_len, dim_model)
+    Input: (batch, seq_len, dim_model)
+    Output: (batch, seq_len, dim_model)
     """
     def __init__(self, dim_model: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
