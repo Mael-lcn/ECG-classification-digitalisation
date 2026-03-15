@@ -153,15 +153,3 @@ class ViT_TimeFreq(nn.Module):
         cls_out = self.norm(x[:, 0]) # (B, dim_model) here we only take the CLS token
 
         return self.head(cls_out) # (B, num_classes)
-
-
-# This main function is only used for sanity check
-if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x = torch.randn(4, 12, 4096).to(device)
-    model = ViT_TimeFreq().to(device)
-    model.eval()
-    with torch.no_grad():
-        out = model(x)
-    assert out.shape == (4, 27), f"Expected (4,27), got {out.shape}"
-    print(f"[OK] ViT_TimeFreq -- input {tuple(x.shape)} -> output {tuple(out.shape)}")
