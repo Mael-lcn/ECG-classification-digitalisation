@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torchaudio
 
-from vit_modules import PatchEmbed, TransformerBlock
+from .vit_modules import PatchEmbed, TransformerBlock
 
 
 class ViT_TimeFreq(nn.Module):
