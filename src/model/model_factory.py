@@ -8,6 +8,7 @@ from Cnn import CNN
 from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
 from DinoTraceTemporal import DinoTraceTemporal 
+from vit import ViT_TimeFreq
 
 
 
@@ -16,7 +17,8 @@ MODEL_REGISTRY = {
     "cnn_base": CNN,
     "cnn_spectro": CNN_TimeFreq,
     "PatchTSTModel": PatchTST_CrossAtt,
-    "DinoTraceTemporal": DinoTraceTemporal
+    "DinoTraceTemporal": DinoTraceTemporal,
+    "ViT_TimeFreq": ViT_TimeFreq
 }
 
 
@@ -92,6 +94,17 @@ def get_shared_parser():
     group_patchtst.add_argument('--revin', action='store_true', default=False, help="Active la Reversible Instance Normalization")
     group_patchtst.add_argument('--no_cross_att', dest='use_cross_att', action='store_false', default=True, 
                                 help="Désactive la Multi-Head Attention entre les canaux")
+    
+
+    # --- 8. Architecture spécifique : Transformer (ViT_TimeFreq)  ---
+    group_vit = parser.add_argument_group("Spécifique au ViT")
+    group_vit.add_argument('--num_layers', type=int, default=4,
+                            help="Nombre de blocs Transformer dans le ViT")
+    group_vit.add_argument('--mlp_ratio', type=float, default=4.0,
+                            help="Ratio MLP hidden dim / d_model")
+    group_vit.add_argument('--emb_dropout', type=float, default=0.1,
+                            help="Dropout sur les embeddings avant l'encodeur")
+    group_vit.add_argument('--patch_size', type=int, nargs='+', default=[5, 5], help="Taille des patches 2D. Ex: --patch_size 5 5")
 
     return parser
 

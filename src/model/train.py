@@ -22,7 +22,6 @@ from TurboDataset_Img import TurboDataset_Img
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from TurboDataset import TurboDataset
 from model_factory import get_shared_parser, build_model
 
 import warnings
@@ -105,6 +104,9 @@ def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device
     print(f"[POS_WEIGHT] Loaded from '{pos_weight_path}'")
     print(f"    Shape : {pw.shape}")
     print(f"    Min   : {pw.min():.4f}  |  Max : {pw.max():.4f}  |  Mean : {pw.mean():.4f}")
+
+    pw = pw.sqrt()
+    print(f"[POS_WEIGHT] After sqrt+clamp → Min: {pw.min():.4f} | Max: {pw.max():.4f}")
 
     return pw.to(device)
 
@@ -406,7 +408,7 @@ def run(args, Dataset_fun):
 
     # Compilation PyTorch 2.0
     try:
-        if model_name in set(['PatchTSTModel', 'DinoTraceTemporal']) or args.use_static_padding:
+        if model_name in set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq']) or args.use_static_padding:
             model = torch.compile(model)
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
