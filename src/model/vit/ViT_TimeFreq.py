@@ -71,7 +71,7 @@ class ViT_TimeFreq(nn.Module):
         #    3. Passes to the next block — progressively richer
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         # add a learnable position signal to each token so the model knows where each patch is in the spectrogram
-        self.pos_embed = nn.Parameter(torch.zeros(1, 512, d_model)) # 512 = max capacity
+        self.pos_embed = nn.Parameter(torch.zeros(1, 2048, d_model))
         self.emb_dropout = nn.Dropout(emb_dropout)
 
         # Transformer encoder (one block = attention + MLP)
