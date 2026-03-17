@@ -47,7 +47,9 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
     abbrv = {
         'in_channels': 'in', 'num_classes': 'cls', 'ch1': 'c1', 'ch2': 'c2', 'ch3': 'c3', 
         'kernel_size': 'k', 'window_size1D': 'w1D', 'n_fft': 'fft', 'context_length': 'ctx',
-        'patch_length': 'pt', 'd_model': 'dm', 'num_heads': 'hd', 'use_cross_att': 'cross'
+        'patch_length': 'pt', 'd_model': 'dm', 'num_heads': 'hd', 'use_cross_att': 'cross',
+        'win_length': 'wlen', 'hop_length': 'hlen', 'mlp_ratio': 'mr', 'patch_size': 'ps',
+        'num_layers': 'nlayers'
     }
 
     for key, value in valid_kwargs.items():
