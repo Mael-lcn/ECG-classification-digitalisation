@@ -22,8 +22,8 @@ from model_factory import get_shared_parser, build_model
 
 torch.set_float32_matmul_precision('high')  # Test d'optimisation
 # Supprime la limite de recompilation pour éviter les crashs avec torch.compile
-torch._dynamo.config.recompile_limit = 6000
-
+#torch._dynamo.config.recompile_limit = 6000
+torch._dynamo.config.cache_size_limit = 6000
 
 # Compute recording-wise accuracy.
 def compute_accuracy(labels, outputs):
@@ -378,7 +378,7 @@ def main():
 
 
     # ================= MODEL =================
-    model, _ = build_model(args)
+    model, _, _ = build_model(args)
     model = model.to(device)
     checkpoint = torch.load(os.path.join(args.checkpoint_dir, args.checkpoint), map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
