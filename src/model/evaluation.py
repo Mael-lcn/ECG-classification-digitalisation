@@ -202,7 +202,7 @@ def evaluate(model, dataloader, device, threshold):
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
 
             #probs = model(x)
-            probs = torch.sigmoid(model(x, batch_mask))
+            probs = torch.sigmoid(model(x, batch_mask=batch_mask))
             binary = (probs >= threshold).int()
 
             all_labels.append(y.cpu())
