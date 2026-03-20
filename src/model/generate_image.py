@@ -105,7 +105,7 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
 
     # Fenêtrage (unfold) sur l'axe du temps (dim=2) -> Shape: (B, 12, N, S)
     segments = tracings.unfold(2, segment_size, segment_size)
-    
+
     segments_np = segments.transpose(1, 2).numpy()
 
     batch_size, num_segments, channels, seq_len = segments_np.shape 
@@ -131,19 +131,19 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
     np.clip(y_coords_float, 0, h - 1, out=y_coords_float) 
     y_coords = (y_coords_float * mult).astype(np.int32) # Shape: (B, N, 12, S)
 
-    # --- OPTIMISATION OPENCV (Vectorisation "Canvas Empilé") ---
+    # --- Vectorisation "Canvas Empilé" ---
     total_images = batch_size * num_segments
-    
+
     # On fusionne Batch et Segments: (Total_images, 12, S)
     y_coords_flat = y_coords.reshape(total_images, 12, seq_len)
-    
+
     # Décalage vertical mathématique pour empiler les 12 dérivations
     offsets = (np.arange(12) * h * mult).reshape(1, 12, 1)
     y_coords_offset = y_coords_flat + offsets
 
     # Préparation des X (identiques partout)
     x_coords = np.linspace(0, (w - 1) * mult, seq_len).astype(np.int32)
-    
+
     # Structure attendue par OpenCV : (Total_images, 12 courbes, seq_len, 1 point, 2 coords)
     pts_all = np.empty((total_images, 12, seq_len, 1, 2), dtype=np.int32)
     pts_all[..., 0, 0] = x_coords

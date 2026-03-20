@@ -32,7 +32,7 @@ class DinoTraceTemporal(nn.Module):
         D_dropout_transformer = 0.3,
         D_dropout_classifier = 0.3,
         D_max_images = 20,
-        unfreeze_blocks = 2,
+        D_unfreeze_blocks = 2,
         sub_batch_size = 32
     ):
         """
@@ -66,10 +66,10 @@ class DinoTraceTemporal(nn.Module):
         # On gèle les couches basses et on libère les couches hautes
         for param in self.backbone.parameters():
             param.requires_grad = False
-            
-        if unfreeze_blocks > 0:
+
+        if D_unfreeze_blocks > 0:
             # Dégel des N derniers blocs du Transformer
-            for block in self.backbone.blocks[-unfreeze_blocks:]:
+            for block in self.backbone.blocks[-D_unfreeze_blocks:]:
                 for param in block.parameters():
                     param.requires_grad = True
             # Dégel de la couche de normalisation finale de DINOv2
