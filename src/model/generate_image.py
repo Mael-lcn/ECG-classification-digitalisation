@@ -110,8 +110,8 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
 
     batch_size, num_segments, channels, seq_len = segments_np.shape 
 
-    # 2. Filtrage moy
-    kernel_size = int(seq_len * 0.05) | 1 
+    # 2. Filtrage moy de 5% forcer à etre pair avec | 1
+    kernel_size = int(seq_len * 0.05) | 1
     # Le filtre s'applique toujours sur la dernière dimension (seq_len)
     baseline = scipy.ndimage.uniform_filter1d(segments_np, size=kernel_size, axis=-1)
     sig_clean = segments_np - baseline
@@ -125,7 +125,7 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
     # 4. Pré-calcul vectorisé des coordonnées
     shift = 4
     mult = 16
-    
+
     # Calcul des Y : Broadcasting direct sans aucune boucle
     y_coords_float = (h / 2.0) - (sig_clean * scale_y_dynamic)
     np.clip(y_coords_float, 0, h - 1, out=y_coords_float) 

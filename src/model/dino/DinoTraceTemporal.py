@@ -25,14 +25,14 @@ class DinoTraceTemporal(nn.Module):
     def __init__(
         self, 
         num_classes = 26, 
-        vit_type = 'dinov2_vitb14',
+        vit_type = 'dinov3_vitb16',
         D_hidden_dim = 512,
         D_num_temp_layers = 2,
         D_nhead = 12,
         D_dropout_transformer = 0.3,
         D_dropout_classifier = 0.3,
         D_max_images = 20,
-        D_unfreeze_blocks = 2,
+        D_unfreeze_blocks = 0,
         sub_batch_size = 32
     ):
         """
@@ -59,7 +59,7 @@ class DinoTraceTemporal(nn.Module):
         self.adapter_norm = nn.GroupNorm(1, 3) 
 
         # Extracteur de features DINOv2
-        self.backbone = torch.hub.load('facebookresearch/dinov2', vit_type)
+        self.backbone = torch.hub.load('facebookresearch/dinov3', vit_type)
         embed_dim = self.backbone.embed_dim 
 
         # Stratégie de Fine-Tuning Partiel
