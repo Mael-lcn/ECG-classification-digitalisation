@@ -108,7 +108,7 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
 
     segments_np = segments.transpose(1, 2).numpy()
 
-    batch_size, num_segments, channels, seq_len = segments_np.shape 
+    batch_size, num_segments, channels, seq_len = segments_np.shape
 
     # 2. Filtrage moy de 5% forcer à etre pair avec | 1
     kernel_size = int(seq_len * 0.05) | 1

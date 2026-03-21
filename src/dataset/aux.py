@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torchaudio
+import torch.nn.functional as F
 
 
 
@@ -197,7 +198,7 @@ def get_active_boundaries(tracings, threshold=1e-6):
 
 
 
-def re_sampling(data, csv, shared_resamplers, resamplers_lock, fo=400):
+def re_sampling(data, csv, end_idxs, shared_resamplers, resamplers_lock, fo=400):
     """
     Rééchantillonne les signaux ECG en les groupant par fréquence et longueur.
 
@@ -218,7 +219,6 @@ def re_sampling(data, csv, shared_resamplers, resamplers_lock, fo=400):
     N, C, T = tracings.shape
 
     # Extraction des bornes d'activité
-    _, end_idxs = get_active_boundaries(tracings)
     real_lengths = end_idxs.cpu().numpy()
 
     # Mapping rapide des IDs pour retrouver les index dans le tenseur original
@@ -363,37 +363,74 @@ def z_norm(chunk, eps=1e-5):
         torch.Tensor: Le même tenseur 'chunk' normalisé.
     """
     _, _, T = chunk.shape
-    device = chunk.device
+    start_idx, end_idx = get_active_boundaries(chunk, threshold=eps)
 
-    # Détection Start/Stop par canal
-    is_active = (chunk.abs() > eps)
+    # Reshape pour le broadcasting -> taille (N, 1, 1)
+    start_idx = start_idx.view(-1, 1, 1)
+    end_idx = end_idx.view(-1, 1, 1)
 
-    # Premier index non-nul
-    start_indices = is_active.int().argmax(dim=2).unsqueeze(-1) # (N, C, 1)
+    # Longueur de la zone active par ECG
+    counts = (end_idx - start_idx).float().clamp(min=1.0)
 
-    # Dernier index non-nul
-    flipped_active = is_active.flip(dims=[2])
-    end_indices = (T - flipped_active.int().argmax(dim=2)).unsqueeze(-1) # (N, C, 1)
-    del flipped_active
+    # Création du masque logique -> taille (N, 1, T)
+    t_grid = torch.arange(T, device=chunk.device).view(1, 1, T)
+    mask = (t_grid >= start_idx) & (t_grid < end_idx)
 
-    # Création du masque temporel
-    t_grid = torch.arange(T, device=device).view(1, 1, T)
+    # Calculs Statistiques Mask-Aware
+    masked_chunk = chunk * mask
 
-    # window_mask est True uniquement entre start et end pour chaque canal
-    window_mask = (t_grid >= start_indices) & (t_grid < end_indices)
+    mean = masked_chunk.sum(dim=2, keepdim=True) / counts
+    sq_mean = (masked_chunk.pow(2)).sum(dim=2, keepdim=True) / counts
+    std = torch.sqrt((sq_mean - mean.pow(2)).clamp(min=1e-8)).clamp(min=eps)
 
-    # Calculs statistiques
-    count = window_mask.sum(dim=2, keepdim=True).float().clamp_(min=1.0)
-
-    # Somme du signal
-    mean = torch.sum(chunk * window_mask, dim=2, keepdim=True).div_(count)
-
-    # Variance (x - mu)^2
-    res = chunk.sub(mean).pow_(2).mul_(window_mask)
-    std = res.sum(dim=2, keepdim=True).div_(count).sqrt_().clamp_(min=eps)
-    del res
-
-    # Application In-Place
-    chunk.sub_(mean).div_(std).mul_(window_mask)
+    # Application In-Place et remise à zéro stricte du padding
+    chunk.sub_(mean).div_(std).mul_(mask)
 
     return chunk
+
+
+def clean_values(chunk):
+    """
+    Supprime la dérive de ligne de base des signaux ECG.
+    
+    Cette méthode applique un filtre à moyenne mobile (uniform filter) pour estimer
+    la composante basse fréquence (ligne de base) et la soustraire du signal original.
+    Le traitement est effectué sur le CPU et optimisé via des opérations in-place.
+
+    Args:
+        chunk (np.ndarray): Tenseur de signaux de forme (N, C, T).
+            N : Nombre d'exemples dans le batch.
+            C : Nombre de dérivations (leads).
+            T : Nombre de points temporels.
+
+    Returns:
+        np.ndarray: Le tenseur 'chunk' modifié en place, libéré de sa dérive.
+    """
+    _, _, T = chunk.shape
+
+    # Création du masque de protection à partir des bornes fournies
+    start_idxs, end_idxs = get_active_boundaries(chunk, threshold=1e-6)
+
+    start_idxs = start_idxs.view(-1, 1, 1)
+    end_idxs_o = end_idxs.view(-1, 1, 1)
+    t_grid = torch.arange(T, device=chunk.device).view(1, 1, T)
+    window_mask = (t_grid >= start_idxs) & (t_grid < end_idxs_o)
+
+    kernel_size = int(T * 0.05) | 1
+    padding = kernel_size // 2
+
+    # Moyenne mobile sur le GPU
+    baseline = F.avg_pool1d(
+        chunk, 
+        kernel_size=kernel_size, 
+        stride=1, 
+        padding=padding,
+        count_include_pad=False
+    )
+
+    # Soustraction in-place et restauration du padding
+    chunk.sub_(baseline)
+    chunk.mul_(window_mask)
+
+    del baseline, window_mask
+    return chunk, end_idxs

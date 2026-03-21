@@ -150,16 +150,19 @@ def unified_worker(task, output):
             # On sauvegarde les IDs valides pour l'assemblage final
             all_valid_ids.append(chunk_ids_raw)
 
+            # D. Calcul Métadonnées
+            chunk_gpu, end_idxs = clean_values(chunk_gpu)
+
             # B. Traitement (Resampling / Filtres)
             if mode == 'D1':
                 # Le resampling crée un nouveau tenseur. On lui passe clean_data.
-                chunk_gpu = re_sampling(clean_data, chunk_csv, global_resamplers, resamplers_lock, fo=TARGET_FREQ)
+                chunk_gpu = re_sampling(clean_data, chunk_csv, end_idxs, global_resamplers, resamplers_lock, fo=TARGET_FREQ)
 
-                # Nettoyage immédiat
-                del clean_data, chunk_csv, chunk_ids_str
+            # Nettoyage immédiat
+            del clean_data, chunk_csv, chunk_ids_str
 
             # C. Normalisation (In-Place pour économiser VRAM)
-            z_norm(chunk_gpu)
+            chunk_gpu = z_norm(chunk_gpu)
 
             # D. Calcul Métadonnées
             s_idx, e_idx = get_active_boundaries(chunk_gpu, threshold=1e-5)
