@@ -108,7 +108,7 @@ def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device
     print(f"    Min   : {pw.min():.4f}  |  Max : {pw.max():.4f}  |  Mean : {pw.mean():.4f}")
 
     pw = pw.sqrt()
-    print(f"[POS_WEIGHT] After sqrt+clamp → Min: {pw.min():.4f} | Max: {pw.max():.4f}")
+    print(f"[POS_WEIGHT] After sqrt -> Min: {pw.min():.4f} | Max: {pw.max():.4f}")
 
     return pw.to(device)
 
