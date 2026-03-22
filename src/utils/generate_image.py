@@ -111,10 +111,10 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
     batch_size, num_segments, channels, seq_len = segments_np.shape
 
     # 2. Filtrage moy de 5% forcer à etre pair avec | 1
-    kernel_size = int(seq_len * 0.05) | 1
+    #kernel_size = int(seq_len * 0.05) | 1
     # Le filtre s'applique toujours sur la dernière dimension (seq_len)
-    baseline = scipy.ndimage.uniform_filter1d(segments_np, size=kernel_size, axis=-1)
-    sig_clean = segments_np - baseline
+    #baseline = scipy.ndimage.uniform_filter1d(segments_np, size=kernel_size, axis=-1)
+    sig_clean = segments_np #- baseline
 
     # 3. Auto-Scale dynamique
     # On calcule le max sur les segments (axe 1) et le temps (axe 3) 
