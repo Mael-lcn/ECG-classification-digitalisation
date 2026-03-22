@@ -1,9 +1,11 @@
 import csv
 from pathlib import Path
-import argparse
+import argparse, os
 from tqdm import tqdm
 import multiprocessing
 import time
+
+
 
 SNOMED_TO_CLASS = {
     "164889003": "AF",
@@ -144,7 +146,6 @@ def run(args):
     rows_per_dataset = {}
 
     with multiprocessing.get_context("spawn").Pool(args.workers) as pool:
-
         for dataset_name, row in tqdm(
             pool.imap(parse_hea_file, hea_files),
             total=len(hea_files),
@@ -186,6 +187,8 @@ def main():
     parser.add_argument("-o", "--output", type=str, default="../../../output/dataset1/")
     parser.add_argument("-w", "--workers", type=int, default=multiprocessing.cpu_count()-1)
     args = parser.parse_args()
+
+    os.makedirs(args.output, exist_ok=True)
 
     run(args)
 
