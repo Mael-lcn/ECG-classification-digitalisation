@@ -372,19 +372,28 @@ def z_norm(chunk, eps=1e-5):
     # Longueur de la zone active par ECG
     counts = (end_idx - start_idx).float().clamp(min=1.0)
 
-    # Création du masque logique -> taille (N, 1, T)
+    # Masque booléen broadcasté (très léger : N x 1 x T en bool)
     t_grid = torch.arange(T, device=chunk.device).view(1, 1, T)
     mask = (t_grid >= start_idx) & (t_grid < end_idx)
 
-    # Calculs Statistiques Mask-Aware
-    masked_chunk = chunk * mask
+    # On annule les valeurs hors-masque IN-PLACE (remplace `chunk * mask`)
+    chunk.masked_fill_(~mask, 0.0)
 
-    mean = masked_chunk.sum(dim=2, keepdim=True) / counts
-    sq_mean = (masked_chunk.pow(2)).sum(dim=2, keepdim=True) / counts
+    # Calculs statistiques sans allouer de gros tenseurs
+    mean = chunk.sum(dim=2, keepdim=True) / counts
+
+    # vector_norm calcule la racine de la somme des carrés en un seul kernel CUDA
+    # Le .pow(2) s'applique sur un minuscule tenseur (N, C, 1)
+    sq_sum = torch.linalg.vector_norm(chunk, ord=2, dim=2, keepdim=True).pow(2)
+    sq_mean = sq_sum / counts
+
     std = torch.sqrt((sq_mean - mean.pow(2)).clamp(min=1e-8)).clamp(min=eps)
 
-    # Application In-Place et remise à zéro stricte du padding
-    chunk.sub_(mean).div_(std).mul_(mask)
+    # Normalisation IN-PLACE
+    chunk.sub_(mean).div_(std)
+
+    # Le .sub_(mean) a décalé les zéros du padding, on les remet à 0 IN-PLACE
+    chunk.masked_fill_(~mask, 0.0)
 
     return chunk
 
