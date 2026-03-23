@@ -12,7 +12,7 @@ import csv
 
 import wandb
 
-from train import need_compile, required_image
+from train import required_image
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
@@ -23,9 +23,7 @@ from model_factory import get_shared_parser, build_model
 
 
 torch.set_float32_matmul_precision('high')  # Test d'optimisation
-# Supprime la limite de recompilation pour éviter les crashs avec torch.compile
-#torch._dynamo.config.recompile_limit = 6000
-torch._dynamo.config.cache_size_limit = 6000
+
 
 # Compute recording-wise accuracy.
 def compute_accuracy(labels, outputs):
@@ -384,9 +382,6 @@ def main():
     checkpoint = torch.load(os.path.join(args.checkpoint_dir, args.checkpoint), map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=True)
-
-    if args.model_name in need_compile or args.use_static_padding:
-        model = torch.compile(model)
 
     # ================= EVALUATION =================
     print('Evaluating model...')

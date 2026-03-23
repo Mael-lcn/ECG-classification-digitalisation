@@ -40,7 +40,7 @@ def get_shared_parser():
 
      # --- 2. Choix du modèle ---
     group_model = parser.add_argument_group("Sélection du Modèle")
-    group_model.add_argument('--model_name', type=str, required=True, choices=MODEL_REGISTRY.keys(),
+    group_model.add_argument('-m', '--model_name', type=str, required=True, choices=MODEL_REGISTRY.keys(),
                              help="Nom du modèle à utiliser")
 
     # --- 3. Architecture partagés par CNN et CNN_TimeFreq ---
