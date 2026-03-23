@@ -12,13 +12,15 @@ from dino import DinoTraceTemporal
 
 
 # Defini un registre de tout les modèles
-MODEL_REGISTRY = {
-    "cnn_base": CNN,
-    "cnn_spectro": CNN_TimeFreq,
-    "PatchTSTModel": PatchTST_CrossAtt,
-    "DinoTraceTemporal": DinoTraceTemporal,
-    "ViT_TimeFreq": ViT_TimeFreq
-}
+model_classes = [
+    CNN, 
+    CNN_TimeFreq, 
+    PatchTST_CrossAtt, 
+    DinoTraceTemporal, 
+    ViT_TimeFreq
+]
+
+MODEL_REGISTRY = {cls.__name__: cls for cls in model_classes}
 
 
 def get_shared_parser():
@@ -36,9 +38,9 @@ def get_shared_parser():
     group_sys.add_argument('--workers', type=int, default=min(2, multiprocessing.cpu_count()-1),
                            help="Nombre de processus pour charger les données")
 
-    # --- 2. Choix du modèle ---
+     # --- 2. Choix du modèle ---
     group_model = parser.add_argument_group("Sélection du Modèle")
-    group_model.add_argument('--model_name', type=str, default="cnn_base", choices=MODEL_REGISTRY.keys(),
+    group_model.add_argument('--model_name', type=str, required=True, choices=MODEL_REGISTRY.keys(),
                              help="Nom du modèle à utiliser")
 
     # --- 3. Architecture partagés par CNN et CNN_TimeFreq ---
@@ -123,4 +125,4 @@ def build_model(args_namespace):
     valid_kwargs = {k: v for k, v in args_dict.items() if k in sig.parameters}
 
     print(f"Le modèle: {model_name} à bien été instancié")
-    return ModelClass(**valid_kwargs), valid_kwargs, model_name
+    return ModelClass(**valid_kwargs), valid_kwargs

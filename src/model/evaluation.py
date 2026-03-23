@@ -12,6 +12,8 @@ import csv
 
 import wandb
 
+from train import need_compile, required_image
+
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
@@ -376,14 +378,15 @@ def main():
         prefetch_factor=2
     )
 
-
     # ================= MODEL =================
-    model, _, _ = build_model(args)
+    model, _ = build_model(args)
     model = model.to(device)
     checkpoint = torch.load(os.path.join(args.checkpoint_dir, args.checkpoint), map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
-    model.load_state_dict(state_dict, strict=False)
-    model = torch.compile(model)
+    model.load_state_dict(state_dict, strict=True)
+
+    if args.model_name in need_compile or args.use_static_padding:
+        model = torch.compile(model)
 
     # ================= EVALUATION =================
     print('Evaluating model...')

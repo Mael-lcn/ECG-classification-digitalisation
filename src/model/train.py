@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
- # All dataset handler
+# All dataset handler
 from TurboDataset import TurboDataset
 from TurboDataset_Img import TurboDataset_Img
 
@@ -29,6 +29,10 @@ import warnings
 
 # On dit à Python tkt c'est pas grave pour ce warning précis
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
+
+
+need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq'])
+required_image = set(['DinoTraceTemporal'])
 
 
 def generate_exp_name(args, valid_kwargs, wandb_id):
@@ -67,10 +71,10 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
             exp_parts.append(f"{name_key}{value}")
 
     exp_parts.append(wandb_id[:6])
-    return "_".join(exp_parts)
+    return "-".join(exp_parts)
 
 
-def load_pos_weight(pos_weight_path: str, num_classes: int, device: torch.device) -> torch.Tensor | None:
+def load_pos_weight(pos_weight_path, num_classes, device):
     """
     Loads the pre-computed pos_weight tensor and moves it to the target device.
     The tensor is expected to have been produced by compute_pos_weight.py and saved
@@ -333,9 +337,9 @@ def run(args, Dataset_fun):
                 print(f"[WANDB] Reprise du run ID : {wandb_id}")
 
     # 4. Créer le model
-    print(f"[INIT] Instanciation du modèle {args.model_name}...")
-    model, valid_kwargs, model_name = build_model(args)
+    model, valid_kwargs = build_model(args)
     model = model.to(device)
+    model_name = args.model_name
 
     # 5. Génération du nom d'expérience dynamique
     exp_name = generate_exp_name(args, valid_kwargs, wandb_id)
@@ -409,7 +413,7 @@ def run(args, Dataset_fun):
 
     # Compilation PyTorch 2.0
     try:
-        if model_name in set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq']) or args.use_static_padding:
+        if model_name in need_compile or args.use_static_padding:
             model = torch.compile(model)
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
@@ -617,6 +621,7 @@ def main():
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../../../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
+
     # Hyperparamètres
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
@@ -640,8 +645,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    required_image = set(['DinoTraceTemporal'])
 
     if args.model_name in required_image:
         Dataset_fun = TurboDataset_Img
