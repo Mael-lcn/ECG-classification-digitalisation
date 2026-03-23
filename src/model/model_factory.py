@@ -1,10 +1,6 @@
-import argparse, os, sys
+import argparse
 import inspect
 import multiprocessing
-
-project_root = os.path.join(os.path.dirname(__file__), '../..')
-sys.path.append(os.path.abspath(project_root))
-
 
 # All models
 from Cnn import CNN
@@ -12,7 +8,6 @@ from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
 from vit import ViT_TimeFreq
 from dino import DinoTraceTemporal
-
 
 
 
