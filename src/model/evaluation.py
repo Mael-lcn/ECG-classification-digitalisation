@@ -327,14 +327,25 @@ def main():
     wandb_id = wandb.util.generate_id()
 
     os.makedirs(args.output, exist_ok=True)
+
+    # 1. On définit le répertoire de base 
+    base_wandb_path = os.path.join(args.output, "wandb_logs")
+    os.makedirs(base_wandb_path, exist_ok=True)
+
+    # 2. On force tout
     os.environ["WANDB_MODE"] = "offline"
-    # On prend le dossier parent de output
-    # On crée le dossier wandb_logs dans ce dossier parent
-    os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
-    os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
+    os.environ["WANDB_DIR"] = base_wandb_path
+    os.environ["WANDB_CACHE_DIR"] = os.path.join(base_wandb_path, "cache")
+    os.environ["WANDB_DATA_DIR"] = base_wandb_path 
+    # Pour tempfile (utilisé par artifact.add_file) :
+    os.environ["TMPDIR"] = os.path.join(base_wandb_path, "tmp")
+
+    os.makedirs(os.environ["WANDB_CACHE_DIR"], exist_ok=True)
+    os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 
     # Récupère le nom du groups
-    group_id = args.checkpoint.split('_ep')[0].replace('best_model_', '')
+    base_name = args.checkpoint.split('_ep')[0] 
+    group_id = base_name.split('-')[-1]
 
     wandb.init(
         project="ECG_Classification_Experiments",
