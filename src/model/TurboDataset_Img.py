@@ -1,11 +1,7 @@
-import os, sys
 import torch
 
-project_root = os.path.join(os.path.dirname(__file__), '../..')
-sys.path.append(os.path.abspath(project_root))
-
 from TurboDataset import TurboDataset
-#from generate_image import create_image_12leads_perchan
+from utils.generate_image import create_image_12leads_perchan
 
 
 
