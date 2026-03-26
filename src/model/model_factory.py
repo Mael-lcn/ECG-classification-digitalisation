@@ -7,7 +7,7 @@ from Cnn import CNN
 from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
 from vit import ViT_TimeFreq
-from dino import DinoTraceTemporal
+from dino import DinoTraceTemporal, DinoStockwell
 
 
 
@@ -17,6 +17,7 @@ model_classes = [
     CNN_TimeFreq, 
     PatchTST_CrossAtt, 
     DinoTraceTemporal, 
+    DinoStockwell, 
     ViT_TimeFreq
 ]
 

@@ -31,7 +31,7 @@ import warnings
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
 
-need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq'])
+need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'DinoTraceTemporal', 'ViT_TimeFreq'])
 required_image = set(['DinoTraceTemporal'])
 
 
