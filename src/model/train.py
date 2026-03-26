@@ -303,7 +303,7 @@ def run(args, Dataset_fun):
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 
-        device = torch.device("cuda")
+        device = torch.device(f"cuda:{args.gpu}")
         use_amp = not args.not_use_amp
         torch.backends.cudnn.benchmark = args.use_static_padding
         print(f"[INIT] Mode: CUDA AMP is {use_amp}")
@@ -621,6 +621,8 @@ def main():
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../../../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
+    parser.add_argument('--gpu', type=int, default=0, 
+                        help="index du GPU a utiliser (config HPC)")
 
     # Hyperparamètres
     parser.add_argument('--epochs', type=int, default=50, help="Nombre max d'époques")
