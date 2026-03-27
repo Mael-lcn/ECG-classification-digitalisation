@@ -6,7 +6,7 @@ import multiprocessing
 from Cnn import CNN
 from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
-from vit import ViT_TimeFreq
+from vit import ViT_TimeFreq, ViT_Image
 from dino import DinoTraceTemporal, DinoStockwell
 
 
@@ -18,7 +18,8 @@ model_classes = [
     PatchTST_CrossAtt, 
     DinoTraceTemporal, 
     DinoStockwell, 
-    ViT_TimeFreq
+    ViT_TimeFreq,
+    ViT_Image
 ]
 
 MODEL_REGISTRY = {cls.__name__: cls for cls in model_classes}
