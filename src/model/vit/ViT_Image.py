@@ -95,13 +95,14 @@ class ViT_Image(nn.Module):
         
         Args:
             x: (batch, num_segments, 12, H, W) uint8 from TurboDataset_Img
-            or(batch, 12, H, W) if already preprocessed???
+            or (batch, 12, H, W) if already preprocessed???
         """
-        # Handle num_segments dimension — take first segment
+        # take first segment
         if x.dim() == 5:
             x = x[:, 0] # (batch, 12, H, W)
 
-        #x = x.float() / 255.0 # normalize to [0, 1]
+        if x.max() > 1.0:
+            x = x.float() / 255.0
 
         batch = x.shape[0]
         x = self.patch_embed(x) # (batch, num_patches, d_model)
