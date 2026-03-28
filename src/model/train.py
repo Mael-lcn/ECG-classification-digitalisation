@@ -31,8 +31,8 @@ import warnings
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
 
-need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'DinoTraceTemporal', 'ViT_TimeFreq'])
-required_image = set(['DinoTraceTemporal'])
+need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
+required_image = set(['DinoTraceTemporal', 'ViT_Image'])
 
 
 def generate_exp_name(args, valid_kwargs, wandb_id):
