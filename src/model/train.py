@@ -629,7 +629,7 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--backbone_lr', type=float, default=1e-6, help="Learning Rate initial for the backbone")
     parser.add_argument('--weight_decay', type=float, default=1e-4, help="pénaliter pour la régularisation du model")
-    parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
+    parser.add_argument('--patience', type=int, default=13, help="Nb époques sans amélioration avant arrêt")
 
 
     # Arguments Système

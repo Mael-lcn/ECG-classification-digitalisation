@@ -90,14 +90,13 @@ def get_shared_parser():
     group_patchtst = parser.add_argument_group("Spécifique au Transformer (PatchTST)")
     group_patchtst.add_argument('--context_length', type=int, default=4096, help="Taille de la fenêtre temporelle en entrée")
     group_patchtst.add_argument('--patch_length', type=int, default=40, help="Taille d'un patch (ex: 40 points = 100ms)")
-    group_patchtst.add_argument('--stride', type=int, default=20, help="Chevauchement entre les patchs")
+    group_patchtst.add_argument('--patch_stride', type=int, default=20, help="Chevauchement entre les patchs")
     group_patchtst.add_argument('--d_model', type=int, default=128, help="Dimension interne du Transformer")
     group_patchtst.add_argument('--num_heads', type=int, default=8, help="Nombre de têtes d'attention")
     group_patchtst.add_argument('--encoder_layers', type=int, default=3, help="Profondeur du Transformer")
     group_patchtst.add_argument('--revin', action='store_true', default=False, help="Active la Reversible Instance Normalization")
-    group_patchtst.add_argument('--no_cross_att', dest='use_cross_att', action='store_false', default=True, 
+    group_patchtst.add_argument('--no_cross_att', dest='PT_use_cross_att', action='store_false', default=True, 
                                 help="Désactive la Multi-Head Attention entre les canaux")
-    
 
     # --- 8. Architecture spécifique : Transformer (ViT_TimeFreq)  ---
     group_vit = parser.add_argument_group("Spécifique au ViT")
