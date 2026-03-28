@@ -9,42 +9,42 @@ from transformers import PatchTSTConfig, PatchTSTModel
 class PatchTST_CrossAtt(nn.Module):
     def __init__(self,
                  in_channels=12,
-                 context_length=1600,
-                 patch_length=40,
-                 stride=20,
-                 d_model=128,
-                 num_heads=8,
-                 cross_att_heads=8,
-                 encoder_layers=3,
-                 revin=False,
+                 PT_context_length=1600,
+                 PT_patch_length=40,
+                 PT_patch_stride=20,
+                 PT_d_model=128,
+                 PT_num_heads=8,
+                 PT_cross_att_heads=8,
+                 PT_encoder_layers=3,
+                 PT_revin=False,
                  num_classes=27, 
-                 use_cross_att=True):
+                 PT_use_cross_att=True):
         super().__init__()
 
         self.config = PatchTSTConfig(
             num_input_channels=in_channels,
-            context_length=context_length,
-            patch_length=patch_length,
-            stride=stride,
-            d_model=d_model,
-            num_heads=num_heads,
-            encoder_layers=encoder_layers,
-            revin=revin
+            context_length=PT_context_length,
+            patch_length=PT_patch_length,
+            patch_stride=PT_patch_stride,
+            d_model=PT_d_model,
+            num_heads=PT_num_heads,
+            encoder_layers=PT_encoder_layers,
+            revin=PT_revin
         )
 
         self.backbone = PatchTSTModel(self.config)
 
-        self.use_cross_att = use_cross_att
-        if use_cross_att:
+        self.use_cross_att = PT_use_cross_att
+        if PT_use_cross_att:
             self.cross_att = nn.MultiheadAttention(
-                embed_dim=d_model, 
-                num_heads=cross_att_heads, 
+                embed_dim=PT_d_model, 
+                num_heads=PT_cross_att_heads, 
                 batch_first=True
             )
-            self.query_token = nn.Parameter(torch.randn(1, 1, d_model))
+            self.query_token = nn.Parameter(torch.randn(1, 1, PT_d_model))
 
         self.classifier = nn.Sequential(
-            nn.Linear(d_model, 64),
+            nn.Linear(PT_d_model, 64),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(64, num_classes)
@@ -93,7 +93,7 @@ class PatchTST_CrossAtt(nn.Module):
                 mask_chunks = None
 
             chunk_outputs = []
-            chunk_batch_size = 1  # Paramètre d'optimisation : nombre de blocs traités simultanément
+            chunk_batch_size = 128  # Paramètre d'optimisation : nombre de blocs traités simultanément
 
             # Itération sur les blocs avec un pas de 'chunk_batch_size'
             for i in range(0, num_chunks, chunk_batch_size):
