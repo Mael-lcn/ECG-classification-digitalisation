@@ -101,8 +101,7 @@ class ViT_Image(nn.Module):
         if x.dim() == 5:
             x = x[:, 0] # (batch, 12, H, W)
 
-        if x.max() > 1.0:
-            x = x.float() / 255.0
+        x = x.float() / 255.0
 
         batch = x.shape[0]
         x = self.patch_embed(x) # (batch, num_patches, d_model)
