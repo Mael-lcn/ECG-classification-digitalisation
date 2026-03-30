@@ -264,8 +264,8 @@ def optimize_coordinate_descent(val_labels, val_probs, weights, classes, sinus_r
     print(f"\n[optimisation] lancement sur {epochs} époques avec {num_workers} processus...")
 
     best_thresholds = np.ones(27) * 0.5 
-    candidate_thresholds = np.arange(0.10, 0.70, 0.05) 
-    
+    candidate_thresholds = np.arange(0.10, 0.50, 0.05)
+
     baseline_preds = (val_probs >= best_thresholds).astype(bool)
     baseline_score = compute_challenge_metric(weights, val_labels, baseline_preds, classes, sinus_rhythm)
     baseline_density = np.mean(np.sum(baseline_preds, axis=1))
@@ -496,7 +496,7 @@ def run(args):
         specificity[k] = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
 
     final_challenge_score = compute_challenge_metric(weights, labels, binary, classes, "NSR")
-    
+
     print(f"score final obtenu (challenge metric) : {final_challenge_score:.4f}")
 
     # Étape 4 : Sauvegarde de la configuration
@@ -505,8 +505,6 @@ def run(args):
     config_dict = {
         "model_name": args.model_name,
         "checkpoint_path": full_checkpoint_path,
-        "final_challenge_score": float(final_challenge_score),
-        "optimal_thresholds_vector": optimal_thresholds.tolist(),
         "thresholds_per_class": {cls: float(th) for cls, th in zip(classes, optimal_thresholds)}
     }
 
