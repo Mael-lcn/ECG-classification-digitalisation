@@ -257,69 +257,113 @@ def get_predictions(model, dataloader, device):
 
 def optimize_coordinate_descent(val_labels, val_probs, weights, classes, sinus_rhythm="NSR", epochs=3, num_workers=4):
     """
-    Trouve les 27 seuils optimaux en maximisant le Challenge Score.
-    Utilise la descente de coordonnées parallélisée avec mémoire partagé.
-    
-    Args:
-        val_labels (np.ndarray): Les labels réels.
-        val_probs (np.ndarray): Les probabilités prédites.
-        weights (np.ndarray): La matrice des poids.
-        classes (list): Liste des classes.
-        sinus_rhythm (str, optional): Nom de la classe saine.
-        epochs (int, optional): Nombre d'itérations complètes.
-        num_workers (int, optional): Nombre de processus parallèles.
-        
-    Returns:
-        np.ndarray: Vecteur des seuils optimisés.
+    optimise les 27 seuils en maximisant la métrique du challenge.
+    intègre un suivi détaillé de la convergence par époque et un logging wandb complet.
     """
-    print(f"\n[Optimisation] Lancement sur {epochs} epochs avec {num_workers} workers...")
+    print(f"\n[optimisation] lancement sur {epochs} époques avec {num_workers} processus...")
 
-    # Initialisation des seuils à 0.5 pour chaque classe
+    # initialisation des paramètres de recherche
     best_thresholds = np.ones(27) * 0.5 
     candidate_thresholds = np.arange(0.10, 0.75, 0.05) 
-    best_global_score = -np.inf
+
+    # évaluation du score de référence (baseline avec tous les seuils à 0.5)
+    baseline_preds = (val_probs >= best_thresholds).astype(bool)
+    baseline_score = compute_challenge_metric(weights, val_labels, baseline_preds, classes, sinus_rhythm)
+    print(f"[baseline] score initial (seuils par défaut à 0.5) : {baseline_score:.4f}")
+
+    best_global_score = baseline_score
+    previous_epoch_score = baseline_score
     step = 0
     total_steps = epochs * 27
 
-    # Préparation des arguments partagés pour le pool
     pool_args = (val_probs, val_labels, weights, classes, sinus_rhythm)
-    
+
     with mp.Pool(processes=num_workers, initializer=_init_worker, initargs=pool_args) as pool:
         with tqdm(total=total_steps, desc="recherche des seuils", unit="cls") as pbar:
             for epoch in range(epochs):
-                for i in range(27):      
-                    # Préparation des tâches contenant uniquement les données légères
-                    tasks = [(th, i, best_thresholds) for th in candidate_thresholds]
+                updates_this_epoch = 0
 
-                    best_th_for_class_i = best_thresholds[i]
+                for i in range(27):      
+                    old_threshold = best_thresholds[i]
+                    best_th_for_class_i = old_threshold
                     best_score_for_class_i = -np.inf
 
-                    # Récupération asynchrone des résultats et identification du meilleur seuil
+                    tasks = [(th, i, best_thresholds) for th in candidate_thresholds]
+
                     for score, th in pool.imap_unordered(_eval_batch, tasks, chunksize=1):
                         if score > best_score_for_class_i:
                             best_score_for_class_i = score
                             best_th_for_class_i = th
 
-                    # Mise à jour une fois que tout le batch de seuils est évalué
-                    best_thresholds[i] = best_th_for_class_i
-                    best_global_score = best_score_for_class_i
+                    # décompte des seuils modifiés par rapport à l'itération précédente
+                    if not np.isclose(best_th_for_class_i, old_threshold):
+                        updates_this_epoch += 1
 
-                    # Traçabilité WandB
+                    best_thresholds[i] = best_th_for_class_i
+
+                    # mise à jour de l'optimum global
+                    if best_score_for_class_i > best_global_score:
+                        best_global_score = best_score_for_class_i
+
+                    # journalisation (par itération de classe)
                     wandb.log({
-                        "optim/step": step,
-                        "optim/epoch": epoch + 1,
-                        "optim/current_class": classes[i],
-                        "optim/best_challenge_score": best_global_score
+                        "optim_step/step": step,
+                        "optim_step/class_index": i,
+                        "optim_step/score": best_global_score
                     })
                     step += 1
 
                     pbar.set_postfix({
                         "epoch": f"{epoch+1}/{epochs}", 
-                        "meilleur_score": f"{best_global_score:.4f}"
+                        "score": f"{best_global_score:.4f}"
                     })
                     pbar.update(1)
 
-    print(f"\n[Succès] Score maximum atteint lors de l'optimisation : {best_global_score:.4f}")
+                # statistiques et bilan de fin d'époque
+                update_pct = (updates_this_epoch / 27.0) * 100
+                epoch_improvement = best_global_score - previous_epoch_score
+
+                # affichage console non bloquant pour la barre tqdm
+                tqdm.write(f"\n--- bilan époque {epoch+1}/{epochs} ---")
+                tqdm.write(f"  évolution du score : {previous_epoch_score:.4f} -> {best_global_score:.4f} (+{epoch_improvement:.4f})")
+                tqdm.write(f"  seuils modifiés    : {updates_this_epoch}/27 classes ({update_pct:.1f}%)")
+
+                # journalisation agrégée (par époque) sur wandb
+                wandb.log({
+                    "optim_epoch/epoch": epoch + 1,
+                    "optim_epoch/score": best_global_score,
+                    "optim_epoch/improvement": epoch_improvement,
+                    "optim_epoch/update_percentage": update_pct
+                })
+
+                # préparation pour la prochaine itération
+                previous_epoch_score = best_global_score
+
+    # calculs finaux
+    total_gain = best_global_score - baseline_score
+    is_converged = (updates_this_epoch == 0)
+    
+    # rapport final dans le terminal
+    print("\n" + "="*50)
+    print("rapport final d'optimisation")
+    print("="*50)
+    print(f"score de référence (0.5) : {baseline_score:.4f}")
+    print(f"score final optimisé     : {best_global_score:.4f}")
+    print(f"gain absolu total        : +{total_gain:.4f}")
+    
+    if is_converged:
+        print("statut de convergence    : atteinte (stabilisation complète des seuils)")
+    else:
+        print("statut de convergence    : non atteinte (des seuils évoluaient encore)")
+        print("recommandation           : augmenter le nombre d'époques ('epochs')")
+    print("="*50 + "\n")
+
+    # journalisation des métriques globales de l'optimisation dans le résumé wandb
+    wandb.run.summary["optim_baseline_score"] = baseline_score
+    wandb.run.summary["optim_final_score"] = best_global_score
+    wandb.run.summary["optim_total_gain"] = total_gain
+    wandb.run.summary["optim_is_converged"] = is_converged
+
     return best_thresholds
 
 
