@@ -258,18 +258,19 @@ def get_predictions(model, dataloader, device):
 def optimize_coordinate_descent(val_labels, val_probs, weights, classes, sinus_rhythm="NSR", epochs=3, num_workers=4):
     """
     optimise les 27 seuils en maximisant la métrique du challenge.
-    intègre un suivi détaillé de la convergence par époque et un logging wandb complet.
+    intègre le suivi de la densité des prédictions, de l'histogramme des seuils
+    et de la trajectoire individuelle de chaque classe.
     """
     print(f"\n[optimisation] lancement sur {epochs} époques avec {num_workers} processus...")
 
-    # initialisation des paramètres de recherche
     best_thresholds = np.ones(27) * 0.5 
-    candidate_thresholds = np.arange(0.10, 0.75, 0.05) 
-
-    # évaluation du score de référence (baseline avec tous les seuils à 0.5)
+    candidate_thresholds = np.arange(0.10, 0.70, 0.05) 
+    
     baseline_preds = (val_probs >= best_thresholds).astype(bool)
     baseline_score = compute_challenge_metric(weights, val_labels, baseline_preds, classes, sinus_rhythm)
-    print(f"[baseline] score initial (seuils par défaut à 0.5) : {baseline_score:.4f}")
+    baseline_density = np.mean(np.sum(baseline_preds, axis=1))
+
+    print(f"[baseline] challenge score: {baseline_score:.4f} | labels moyens par patient: {baseline_density:.2f}")
 
     best_global_score = baseline_score
     previous_epoch_score = baseline_score
@@ -287,7 +288,6 @@ def optimize_coordinate_descent(val_labels, val_probs, weights, classes, sinus_r
                     old_threshold = best_thresholds[i]
                     best_th_for_class_i = old_threshold
                     best_score_for_class_i = -np.inf
-
                     tasks = [(th, i, best_thresholds) for th in candidate_thresholds]
 
                     for score, th in pool.imap_unordered(_eval_batch, tasks, chunksize=1):
@@ -295,21 +295,18 @@ def optimize_coordinate_descent(val_labels, val_probs, weights, classes, sinus_r
                             best_score_for_class_i = score
                             best_th_for_class_i = th
 
-                    # décompte des seuils modifiés par rapport à l'itération précédente
                     if not np.isclose(best_th_for_class_i, old_threshold):
                         updates_this_epoch += 1
 
                     best_thresholds[i] = best_th_for_class_i
 
-                    # mise à jour de l'optimum global
                     if best_score_for_class_i > best_global_score:
                         best_global_score = best_score_for_class_i
 
-                    # journalisation (par itération de classe)
                     wandb.log({
                         "optim_step/step": step,
                         "optim_step/class_index": i,
-                        "optim_step/score": best_global_score
+                        "optim_step/challenge_score": best_global_score
                     })
                     step += 1
 
@@ -319,49 +316,80 @@ def optimize_coordinate_descent(val_labels, val_probs, weights, classes, sinus_r
                     })
                     pbar.update(1)
 
-                # statistiques et bilan de fin d'époque
+                # Calculs de fin d'époque
+                current_preds = (val_probs >= best_thresholds).astype(bool)
+
+                # métriques de classification classiques
+                epoch_acc = compute_accuracy(val_labels, current_preds)
+                epoch_f1, _ = compute_f_measure(val_labels, current_preds)
+
+                # densité de prédiction (nombre moyen de maladies prédites par patient)
+                labels_per_patient = np.sum(current_preds, axis=1)
+                mean_pred_density = np.mean(labels_per_patient)
+
+                conf_matrices = compute_confusion_matrices(val_labels, current_preds)
+                sensitivities, specificities = [], []
+                for k in range(len(classes)):
+                    tp, fp, fn, tn = conf_matrices[k,1,1], conf_matrices[k,1,0], conf_matrices[k,0,1], conf_matrices[k,0,0]
+                    sensitivities.append(tp / (tp + fn) if (tp + fn) > 0 else np.nan)
+                    specificities.append(tn / (tn + fp) if (tn + fp) > 0 else np.nan)
+
+                epoch_macro_sens = np.nanmean(sensitivities)
+                epoch_macro_spec = np.nanmean(specificities)
+
+                th_mean = np.mean(best_thresholds)
+                th_min = np.min(best_thresholds)
+                th_max = np.max(best_thresholds)
+
                 update_pct = (updates_this_epoch / 27.0) * 100
                 epoch_improvement = best_global_score - previous_epoch_score
 
-                # affichage console non bloquant pour la barre tqdm
                 tqdm.write(f"\n--- bilan époque {epoch+1}/{epochs} ---")
-                tqdm.write(f"  évolution du score : {previous_epoch_score:.4f} -> {best_global_score:.4f} (+{epoch_improvement:.4f})")
-                tqdm.write(f"  seuils modifiés    : {updates_this_epoch}/27 classes ({update_pct:.1f}%)")
+                tqdm.write(f"  challenge score : {best_global_score:.4f} (+{epoch_improvement:.4f})")
+                tqdm.write(f"  densité labels  : {mean_pred_density:.2f} prédictions/patient")
+                tqdm.write(f"  modifications   : {updates_this_epoch}/27 classes ({update_pct:.1f}%)")
 
-                # journalisation agrégée (par époque) sur wandb
-                wandb.log({
+                # préparation du dictionnaire de logs
+                epoch_logs = {
                     "optim_epoch/epoch": epoch + 1,
-                    "optim_epoch/score": best_global_score,
+                    "optim_epoch/challenge_score": best_global_score,
+                    "optim_epoch/accuracy": epoch_acc,
+                    "optim_epoch/macro_f1": epoch_f1,
+                    "optim_epoch/macro_sensitivity": epoch_macro_sens,
+                    "optim_epoch/macro_specificity": epoch_macro_spec,
+                    "optim_epoch/prediction_density": mean_pred_density,
+                    "optim_epoch/threshold_mean": th_mean,
+                    "optim_epoch/threshold_min": th_min,
+                    "optim_epoch/threshold_max": th_max,
                     "optim_epoch/improvement": epoch_improvement,
-                    "optim_epoch/update_percentage": update_pct
-                })
+                    "optim_epoch/update_percentage": update_pct,
+                    "optim_epoch/thresholds_distribution": wandb.Histogram(best_thresholds)
+                }
 
-                # préparation pour la prochaine itération
+                # injection des 27 seuils individuels pour créer le graphe des trajectoires
+                for idx, cls_name in enumerate(classes):
+                    epoch_logs[f"optim_class_thresholds/{cls_name}"] = best_thresholds[idx]
+
+                wandb.log(epoch_logs)
                 previous_epoch_score = best_global_score
 
-    # calculs finaux
+    # rapport final
     total_gain = best_global_score - baseline_score
     is_converged = (updates_this_epoch == 0)
     
-    # rapport final dans le terminal
-    print("\n" + "="*50)
-    print("rapport final d'optimisation")
-    print("="*50)
+    print("\n" + "="*55)
+    print("rapport final d'optimisation (métrique challenge)")
+    print("="*55)
     print(f"score de référence (0.5) : {baseline_score:.4f}")
     print(f"score final optimisé     : {best_global_score:.4f}")
     print(f"gain absolu total        : +{total_gain:.4f}")
-    
-    if is_converged:
-        print("statut de convergence    : atteinte (stabilisation complète des seuils)")
-    else:
-        print("statut de convergence    : non atteinte (des seuils évoluaient encore)")
-        print("recommandation           : augmenter le nombre d'époques ('epochs')")
-    print("="*50 + "\n")
+    print(f"densité finale           : {mean_pred_density:.2f} labels/patient")
+    print("="*55 + "\n")
 
-    # journalisation des métriques globales de l'optimisation dans le résumé wandb
     wandb.run.summary["optim_baseline_score"] = baseline_score
     wandb.run.summary["optim_final_score"] = best_global_score
     wandb.run.summary["optim_total_gain"] = total_gain
+    wandb.run.summary["optim_final_density"] = mean_pred_density
     wandb.run.summary["optim_is_converged"] = is_converged
 
     return best_thresholds
