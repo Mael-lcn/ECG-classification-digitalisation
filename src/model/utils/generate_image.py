@@ -5,81 +5,75 @@ import torch.nn.functional as F
 import cv2
 import h5py
 import torchvision.utils as vutils
-import scipy.ndimage
-import scipy.signal
 
 
 
-def create_image_12leads_together(tracings, h=518, w=518, segment_size=4000, scale_y=13.0):
+# --- Palette de 12 couleurs très distinctes (Format RGB) ---
+distinct_colors = [
+    (255, 0, 0),      # 1. Rouge
+    (0, 0, 255),      # 2. Bleu profond
+    (0, 150, 0),      # 3. Vert foncé
+    (255, 120, 0),    # 4. Orange
+    (150, 0, 150),    # 5. Violet
+    (0, 200, 200),    # 6. Cyan (Turquoise)
+    (139, 69, 19),    # 7. Marron (SaddleBrown)
+    (255, 0, 255),    # 8. Magenta
+    (100, 200, 0),    # 9. Vert Lime
+    (0, 100, 100),    # 10. Sarcelle (Teal)
+    (255, 105, 180),  # 11. Rose (Hot Pink)
+    (0, 0, 128)       # 12. Bleu Marine
+]
+
+
+def create_image_12leads_together(tracings, h=512, w=512, segment_size=1000, scale_y=2.8, rgb=True):
     """
-    Genere un tenseur visuel ou les douze derivations sont tracees sur une image unique.
-
-    Les signaux sont decoupes en fenetres temporelles. Pour chaque fenetre, 
-    les derivations sont filtrees puis empilees verticalement sur un fond blanc 
-    a l'aide de lignes de reference horizontales.
-
+    Génération pour ECG avec support optionnel des couleurs.
+    
     Args:
-        tracings (torch.Tensor): Tenseur des signaux bruts.
-        h (int, optional): Hauteur de l'image de sortie en pixels.
-        w (int, optional): Largeur de l'image de sortie en pixels.
-        segment_size (int, optional): Nombre de points de mesure par image.
-        scale_y (float, optional): Facteur d'amplification verticale du trace.
-
-    Returns:
-        torch.Tensor: Tenseur des images generees au format couleurs classiques.
+        tracings: Tenseur des signaux bruts.
+        rgb (bool): Si True, chaque lead a une couleur unique (3 canaux). 
+                    Si False, tout est noir (1 canal étendu).
     """
-    tracings = torch.transpose(tracings, 1, 2)
-    batch_size, channels, time_steps = tracings.shape
+    B, C, T = tracings.shape
+    segments = tracings.unfold(2, segment_size, segment_size)
+    B, C, S, L = segments.shape
 
-    step = segment_size
-    segments = tracings.unfold(2, segment_size, step)
-    batch_size, channels, num_segments, seq_len = segments.shape
+    offsets = np.linspace(h * 0.05, h * 0.95, 12).astype(np.int32)
+    x_coords = np.linspace(0, w - 1, L).astype(np.int32)
 
-    output_images = torch.empty((batch_size, num_segments, 3, h, w), dtype=torch.float32)
-    offsets = np.linspace(h * 0.05, h * 0.95, 12).astype(int)
+    # Allocation de la mémoire selon le mode
+    num_channels = 3 if rgb else 1
+    output_np = np.full((B, S, h, w, num_channels), 255, dtype=np.uint8)
 
-    for b in range(batch_size):
-        for n in range(num_segments):
-            img = np.full((h, w, 3), 255, dtype=np.uint8)
+    segments_np = segments.numpy()
 
+    for b in range(B):
+        for n in range(S):
+            img_slice = output_np[b, n]
             for i in range(12):
-                # Extraction du signal local
-                sig_raw = segments[b, i, n, :].numpy()
+                sig = segments_np[b, i, n, :]
+                y_coords = (offsets[i] - sig * scale_y).astype(np.int32)
+                np.clip(y_coords, 0, h - 1, out=y_coords)
 
-                # Etape de nettoyage du signal
-                # Estimation de la ligne de base par filtre median
-                # La taille du noyau doit rester un nombre impair, fixee a cinq pour cent de la longueur
-                kernel_size = int(seq_len * 0.05)
-                if kernel_size % 2 == 0: 
-                    kernel_size += 1 
+                pts = np.column_stack((x_coords, y_coords)).reshape((-1, 1, 2))
 
-                # Isolement de l'oscillation lente
-                baseline = scipy.signal.medfilt(sig_raw, kernel_size)
+                # Sélection de la couleur selon le mode
+                color = distinct_colors[i] if rgb else 0
 
-                # Soustraction pour aplanir le trace
-                sig_clean = sig_raw - baseline
+                # Épaisseur 2 et Anti-Aliasing
+                cv2.polylines(img_slice, [pts], False, color, 2, cv2.LINE_AA)
 
-                # Trace de la ligne de reference en gris
-                #cv2.line(img, (0, offsets[i]), (w, offsets[i]), (230, 230, 230), 1)
+    # Conversion en tenseur Torch [B, S, C, H, W]
+    final_tensor = torch.from_numpy(output_np).permute(0, 1, 4, 2, 3).contiguous()
 
-                x_coords = np.linspace(0, w - 1, seq_len).astype(int)
+    # Si mode N&B, on simule les 3 canaux virtuellement
+    if not rgb:
+        final_tensor = final_tensor.expand(-1, -1, 3, -1, -1)
 
-                # Calcul des coordonnees avec le signal aplani
-                y_coords = (offsets[i] - sig_clean * scale_y).astype(int)
-                y_coords = np.clip(y_coords, 0, h - 1)
-
-                pts = np.vstack((x_coords, y_coords)).T.reshape((-1, 1, 2))
-
-                # Lissage du trait
-                cv2.polylines(img, [pts], isClosed=False, color=(0, 0, 0), thickness=2, lineType=cv2.LINE_AA)
-
-            img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-            output_images[b, n] = img_tensor
-
-    return output_images
+    return final_tensor # Retourne du uint8
 
 
-def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
+def create_image_12leads_perchan(tracings, h=512, w=512, segment_size=4000):
     """
     Genere un tenseur d'images optimise ou chaque derivation possede son propre canal.
 
@@ -164,36 +158,41 @@ def create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000):
 
 
 if __name__ == "__main__":
-    file_path = "../../../output/normalize_data/georgia.hdf5"
+    file_path = "../../../../output/normalize_data/georgia.hdf5"
+    output_path = "../../../../output/img/"
+    h = 512
+    w = 512
+
+    os.makedirs(output_path, exist_ok=True)
 
     with h5py.File(file_path, 'r') as f:
         tracings = torch.from_numpy(f['tracings'][:10])
 
+    """
     images_tensor = create_image_12leads_perchan(tracings, h=518, w=518, segment_size=4000)
 
     print(f"Format du tenseur genere : {images_tensor.shape}")
 
     flat_images = images_tensor.view(-1, 12, 518, 518)
-    os.makedirs("../../../output/img/", exist_ok=True)
 
     for i in range(min(5, flat_images.size(0))):
         grid_input = flat_images[i].unsqueeze(1).float() / 255.0
 
-        vutils.save_image(grid_input, f"../../../output/img/check_dino_12channels_{i}.png", nrow=4, normalize=False)
+        vutils.save_image(grid_input, f"../../../../output/img/check_dino_12channels_{i}.png", nrow=4, normalize=False)
 
     """
-    images_tensor = create_image_12leads_together(tracings, h=518, w=518)
+    images_tensor = create_image_12leads_together(tracings, h, w)
 
     # Fusion des dimensions du lot et des segments pour l'exportation
     # Regroupement sequentiel des images generees
-    flat_images = images_tensor.view(-1, 3, 518, 518)
+    flat_images = images_tensor.view(-1, 3, h, w)
 
     # Enregistrement d'un echantillon pour le controle visuel
     for i in range(min(10, flat_images.size(0))):
+        img_float = flat_images[i].to(torch.float32) / 255.0
         # Enregistrement direct au format image standard
-        vutils.save_image(flat_images[i], f"check_dino_input_{i}.png")
+        vutils.save_image(img_float, f"{output_path}/check_dino_1channels_{i}.png")
 
     print(f"Verification terminee : echantillons sauvegardes depuis le tenseur de taille {images_tensor.shape}")
-    """
 
     print("Generation terminee.")

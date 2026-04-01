@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 # All dataset handler
 from TurboDataset import TurboDataset
 from TurboDataset_Img import TurboDataset_Img
+from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
@@ -32,7 +33,9 @@ warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
 
 need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
-required_image = set(['DinoTraceTemporal', 'ViT_Image'])
+
+required_image_12l_together = set(['DinoTraceTemporal', 'ViT_Image'])
+
 
 
 def generate_exp_name(args, valid_kwargs, wandb_id):
@@ -368,25 +371,26 @@ def run(args, Dataset_fun):
     print(f"Début de l'expérience : {exp_name}")
     print(f"[INIT] Préparation des TurboDatasets (Format .npy)...")
 
-    # Création du Dataset d'entraînement
     mb_size = args.batch_size_theoric * args.mega_batch_factor
+    dataset_kwargs = {
+        "batch_size": args.batch_size_accumulat,
+        "mega_batch_size": mb_size,
+        "use_static_padding": args.use_static_padding
+    }
 
-    # Création du Dataset d'entraînement
+    if Dataset_fun == TurboDataset_Img:
+        dataset_kwargs["generate_img"] = create_image_12leads_together
+
+    # Création des Datasets
     train_ds = Dataset_fun(
         data_path=args.train_data,
-        batch_size=args.batch_size_accumulat,
-        mega_batch_size=mb_size,
-        use_static_padding=args.use_static_padding
+        **dataset_kwargs
     )
 
-    # Création du Dataset de validation
     val_ds = Dataset_fun(
         data_path=args.val_data, 
-        batch_size=args.batch_size_accumulat,
-        mega_batch_size=mb_size,
-        use_static_padding=args.use_static_padding
+        **dataset_kwargs
     )
-
 
     # Création des DataLoaders
     # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
@@ -648,7 +652,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.model_name in required_image:
+    if args.model_name in required_image_12l_together:
         Dataset_fun = TurboDataset_Img
     else:
         Dataset_fun = TurboDataset

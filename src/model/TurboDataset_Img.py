@@ -1,29 +1,28 @@
 import torch
 
 from TurboDataset import TurboDataset
-from utils.generate_image import create_image_12leads_perchan
-
 
 
 class TurboDataset_Img(TurboDataset):
     """
-    Dataset hérité pour la génération à la volée d'images ECG pour DINOv2.
+    Dataset hérité pour la génération à la volée d'images ECG pour DINOv3.
     
     Hérite de la mécanique I/O ultra-optimisée de TurboDataset (lecture 1D contiguë)
     et applique la rastérisation OpenCV en multi-processing CPU juste avant 
     l'envoi au GPU.
     """
-    def __init__(self, data_path, segment_size=4000, h=518, w=518, **kwargs):
+    def __init__(self, data_path, generate_img, segment_size=1000, h=512, w=512, **kwargs):
         # On initialise toute la machinerie I/O du parent
         super().__init__(data_path, **kwargs)
         self.segment_size = segment_size
         self.h = h
         self.w = w
+        self.generate_img = generate_img
 
     def __iter__(self):
         for batch_x, batch_y, batch_mask in super().__iter__():
             # 1. Generation des images en uint8
-            batch_images = create_image_12leads_perchan(
+            batch_images = self.generate_img(
                 batch_x, 
                 h=self.h, 
                 w=self.w, 
