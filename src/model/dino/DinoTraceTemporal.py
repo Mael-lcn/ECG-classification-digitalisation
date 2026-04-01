@@ -1,18 +1,17 @@
 import torch
 import torch.nn as nn
-import torch.hub
+from transformers import AutoModel
 
 
 
 class DinoTraceTemporal(nn.Module):
     """
-    Modèle DINOv3 avec gestion VRAM stricte (Micro-Batching),
+    Modèle DINOv3 (via Hugging Face Cache) avec gestion VRAM stricte (Micro-Batching),
     suivi d'une Attention Temporelle, Max Pooling et classification MLP.
     """
     def __init__(
         self, 
         num_classes=26, 
-        vit_type='dinov3_vitb16',
         D_hidden_dim=512,
         D_dropout_classifier=0.4,
         sub_batch_size=16,
@@ -21,11 +20,14 @@ class DinoTraceTemporal(nn.Module):
         super().__init__()
         self.sub_batch_size = sub_batch_size
 
-        # Backbone DINOv3
-        self.backbone = torch.hub.load('facebookresearch/dinov3', vit_type)        
-        embed_dim = self.backbone.embed_dim 
+        # 1. Chargement du Backbone DINO depuis le cache standard Hugging Face
+        # L'identifiant officiel du repo
+        repo_id = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 
-        # Gel total du backbone
+        self.backbone = AutoModel.from_pretrained(repo_id, local_files_only=True)        
+        embed_dim = self.backbone.config.hidden_size 
+
+        # Gel total du backbone pour ne pas exploser la RAM
         for param in self.backbone.parameters():
             param.requires_grad = False
 
@@ -34,7 +36,6 @@ class DinoTraceTemporal(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
         # Attention Temporelle (Self/Cross-Attention sur la séquence)
-        # Permet aux différents segments ECG d'un même patient de s'influencer mutuellement
         self.temporal_attention = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=D_nhead,
@@ -52,7 +53,7 @@ class DinoTraceTemporal(nn.Module):
             nn.Linear(D_hidden_dim, num_classes)
         )
 
-    def forward(self, x):
+    def forward(self, x, batch_mask):
         """
         Args:
             x (torch.Tensor): [Batch, Segments, 3, H, W] - Images uint8 ou float
@@ -72,15 +73,19 @@ class DinoTraceTemporal(nn.Module):
                     chunk = chunk.float() / 255.0
                 chunk = (chunk - self.mean) / self.std
 
-                # Extraction DINO
-                feat = self.backbone(chunk)
+                # Extraction DINO via Hugging Face
+                outputs = self.backbone(pixel_values=chunk)
+                
+                # Le modèle HF renvoie la séquence de patchs. 
+                # On prend le token [CLS] (index 0) qui représente l'image entière condensée.
+                feat = outputs.last_hidden_state[:, 0, :]
+
                 all_features.append(feat)
 
         # Recombinaison temporelle des blocs
         features = torch.cat(all_features, dim=0).view(B, S, -1)
 
         # Attention Temporelle
-        # Chaque fenêtre ECG interagit avec les autres pour capter le rythme global
         attn_out = self.temporal_attention(features)
 
         # Agrégation MAX

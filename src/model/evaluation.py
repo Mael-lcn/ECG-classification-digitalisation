@@ -187,7 +187,7 @@ def compute_challenge_metric(weights, labels, outputs, classes, sinus_rhythm):
     return normalized_score
 
 
-def evaluate(model, dataloader, device, threshold_tensor):
+def evaluate(model, dataloader, device, threshold):
     model.eval()
     all_labels, all_probs, all_binary = [], [], []
 
@@ -203,7 +203,7 @@ def evaluate(model, dataloader, device, threshold_tensor):
 
             #probs = model(x)
             probs = torch.sigmoid(model(x, batch_mask=batch_mask))
-            binary = (probs >= threshold_tensor).int()
+            binary = (probs >= threshold).int()
 
             all_labels.append(y.cpu())
             all_probs.append(probs.cpu())
@@ -300,8 +300,10 @@ def main():
     )
 
     parser.add_argument('--data', default="../../../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('-c', '--config', required=True, help="fichier json d'optimisation (contient seuils et checkpoint)")
+    parser.add_argument('-c', '--checkpoints', required=True, help="fichier checkpoint .pt")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
+
+    parser.add_argument('--threshold', type=float, default=0.5, help="seuil du model")
 
     args = parser.parse_args()
 
@@ -319,24 +321,6 @@ def main():
     # Load weights
     weight_classes, weights = load_weights(args.weights)
     assert weight_classes == classes, "Class order mismatch with weights.csv"
-
-    with open(args.config, 'r', encoding='utf-8') as f:
-        config_data = json.load(f)
-
-    checkpoint_path = config_data["checkpoint_path"]
-    thresholds_dict = config_data["thresholds_per_class"]
-
-    # construction stricte : on boucle sur la liste officielle (classes) 
-    # et on pioche dans le dictionnaire pour garantir l'alignement absolu
-    thresholds_array = np.zeros(len(classes), dtype=np.float32)
-    for i, cls in enumerate(classes):
-        if cls not in thresholds_dict:
-            raise ValueError(f"la classe '{cls}' est introuvable dans le dictionnaire des seuils.")
-        thresholds_array[i] = thresholds_dict[cls]
-
-    # transfert sur l'appareil cible pour le broadcasting
-    threshold_tensor = torch.tensor(thresholds_array, device=device)
-    print(f"configuration chargée. {len(classes)} seuils alignés.")
 
     # ================= CONFIGURATION WANDB =================
     wandb_id = wandb.util.generate_id()
@@ -359,7 +343,7 @@ def main():
     os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 
     # Récupère le nom du groups
-    base_name = os.path.basename(checkpoint_path).split('_ep')[0]
+    base_name = os.path.basename(args.checkpoints).split('_ep')[0]
     group_id = base_name.split('-')[-1]
 
     wandb.init(
@@ -370,7 +354,7 @@ def main():
         id=wandb_id,
         config={
             "config_file": args.config,
-            "checkpoint_source": checkpoint_path,
+            "checkpoint_source": args.checkpoints,
             "test_batch_size": args.batch_size_theoric,
             "use_static_padding": args.use_static_padding,
             "model_tested": args.model_name
@@ -378,7 +362,7 @@ def main():
         tags=["eval", "final_test", args.model_name, "offline"]
     )
 
-    print(f"Début de l'évaluation : {checkpoint_path}")
+    print(f"Début de l'évaluation : {args.checkpoints}")
 
     # ================= DATASET & DATALOADER =================
     mb_size = args.batch_size_theoric * args.mega_batch_factor
@@ -406,13 +390,13 @@ def main():
     model, _ = build_model(args)
     model = model.to(device)
     # chargement utilisant le chemin dicté par le fichier json
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(args.checkpoints, map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=True)
 
     # évaluation avec le tenseur de seuils
     print("inférence en cours...")
-    labels, binary, probs = evaluate(model, test_loader, device, threshold_tensor)
+    labels, binary, probs = evaluate(model, test_loader, device, args.threshold)
 
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
@@ -451,7 +435,7 @@ def main():
     wandb.run.summary["Accuracy"]        = acc
     wandb.run.summary["Macro_F1"]        = f1
     wandb.run.summary["Challenge_Score"] = challenge
-    wandb.run.summary["checkpoint"]      = checkpoint_path
+    wandb.run.summary["checkpoint"]      = args.checkpoints
 
     # Per-class table
     class_table = wandb.Table(columns=["Class", "Applied_Threshold", "F1", "AUROC", "AUPRC", "Sensitivity", "Specificity"])
@@ -461,14 +445,13 @@ def main():
         auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else None
         sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else None
         spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else None
-        class_table.add_data(cls, float(thresholds_array[i]), f1_val, auroc_val, auprc_val, sens_val, spec_val)
-
+        class_table.add_data(cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val)
     wandb.log({"eval/per_class_metrics": class_table})
 
 
    # ================= SAVE CSV =================
     # On nettoie le nom pour éviter l'extension .pt dans le nom du CSV
-    name = os.path.basename(checkpoint_path).replace('.pt', '')
+    name = os.path.basename(args.checkpoints).replace('.pt', '')
 
     output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:
@@ -487,7 +470,7 @@ def main():
             auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else 'nan'
             sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else 'nan'
             spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else 'nan'
-            writer.writerow([cls, thresholds_array[i], f1_val, auroc_val, auprc_val, sens_val, spec_val])
+            writer.writerow([cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val])
 
     print(f"Per-class metrics saved to {output_csv_per_class}")
 
