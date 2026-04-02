@@ -116,6 +116,9 @@ class TurboDataset(IterableDataset):
                     batch_idx = list(range(j, min(j + self.batch_size, mb_size)))
                     cur_bs = len(batch_idx)
 
+                    if cur_bs == 1:
+                        continue
+
                     # Stratégie de padding
                     if self.use_static_padding:
                         target_t = self.max_signal_length
