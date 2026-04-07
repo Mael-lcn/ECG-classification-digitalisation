@@ -13,7 +13,6 @@ import csv
 from model.utils.generate_image import create_image_12leads_perchan
 import wandb
 
-
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
