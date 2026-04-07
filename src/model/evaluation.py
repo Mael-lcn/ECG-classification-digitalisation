@@ -12,8 +12,6 @@ import csv
 
 import wandb
 
-from train import required_image
-
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
@@ -353,7 +351,7 @@ def main():
         name=f"test_{args.model_name}_{wandb_id[:6]}",
         id=wandb_id,
         config={
-            "config_file": args.config,
+#            "config_file": args.config,
             "checkpoint_source": args.checkpoints,
             "test_batch_size": args.batch_size_theoric,
             "use_static_padding": args.use_static_padding,
