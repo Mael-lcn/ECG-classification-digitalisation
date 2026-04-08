@@ -10,7 +10,6 @@ from tqdm import tqdm
 import multiprocessing
 import csv
 
-from model.utils.generate_image import create_image_12leads_perchan
 import wandb
 
 from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
@@ -205,9 +204,6 @@ def evaluate(model, dataloader, device, threshold):
             if x.shape[-1] == 0:
                 print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
-
-            if x.dtype == torch.uint8:
-                x = x.float() / 255.0
 
             #probs = model(x)
             probs = torch.sigmoid(model(x, batch_mask=batch_mask))

@@ -176,7 +176,7 @@ def train_one_epoch(
     
             # Important : On divise la loss par accumulation_steps car backward() 
             # additionne les gradients. Cette division garantit que le gradient 
-            # final correspond à la moyenne sur batch_size_theoric.
+            # final correspond à la moyenne sur batch_size_theoric
             loss = criterion(predictions, targets) / accumulation_steps
 
         # 2. Backward Pass (Accumulation automatique dans les buffers de gradients)
@@ -275,7 +275,7 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
 
 
 
-def run(args, Dataset_fun):
+def run(args):
     """
     Orchestre le cycle de vie complet de l'expérience d'entraînement (Pipeline principal).
 
