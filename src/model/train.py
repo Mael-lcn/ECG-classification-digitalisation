@@ -621,8 +621,6 @@ def main():
                         help="Dossier contenant les fichiers H5 de train")
     parser.add_argument('--val_data', type=str, default="../../../output/final_data/val", 
                         help="Dossier contenant les fichiers H5 de validation")
-    parser.add_argument('--gpu', type=int, default=0,
-                        help="index du GPU a utiliser (config HPC)")
 
     # Hyperparamètres
     parser.add_argument('--epochs', type=int, default=80, help="Nombre max d'époques")

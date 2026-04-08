@@ -46,6 +46,8 @@ def get_shared_parser():
                            help="Chemin JSON mappant les indices aux noms de classes")    
     group_sys.add_argument('-w', '--workers', type=int, default=min(max(4, multiprocessing.cpu_count()-1), 16),
                            help="Nombre de processus pour charger les données")
+    group_sys.add_argument('--gpu', type=int, default=0,
+                        help="index du GPU a utiliser (config HPC)")
 
      # --- 2. Choix du modèle ---
     group_model = parser.add_argument_group("Sélection du Modèle")

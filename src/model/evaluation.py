@@ -315,7 +315,7 @@ def main():
     multiprocessing.set_start_method("spawn", force=True)     
     torch.set_num_threads(args.workers)         
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
 
     # Load classes
     with open(args.class_map) as f:
