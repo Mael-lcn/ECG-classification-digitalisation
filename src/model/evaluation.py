@@ -185,7 +185,7 @@ def compute_challenge_metric(weights, labels, outputs, classes, sinus_rhythm):
     return normalized_score
 
 
-def evaluate(model, dataloader, device, threshold):
+def evaluate(model, dataloader, device, threshold, use_amp):
     model.eval()
     all_labels, all_probs, all_binary = [], [], []
 
@@ -205,8 +205,9 @@ def evaluate(model, dataloader, device, threshold):
                 print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
 
-            #probs = model(x)
-            probs = torch.sigmoid(model(x, batch_mask=batch_mask))
+            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
+                probs = torch.sigmoid(model(x, batch_mask=batch_mask))
+
             binary = (probs >= threshold).int()
 
             all_labels.append(y.cpu())
@@ -304,16 +305,20 @@ def main():
     )
 
     parser.add_argument('--data', default="../../../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('-c', '--checkpoints', required=True, help="fichier checkpoint .pt")
+    parser.add_argument('-c', '--checkpoint', required=True, help="path to checkpoint.pt")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
 
     parser.add_argument('--threshold', type=float, default=0.5, help="seuil du model")
 
     args = parser.parse_args()
 
+    checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
+
     # multiprocessing set up
     multiprocessing.set_start_method("spawn", force=True)     
     torch.set_num_threads(args.workers)         
+
+    use_amp = not args.not_use_amp
 
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
 
@@ -347,7 +352,7 @@ def main():
     os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 
     # Récupère le nom du groups
-    base_name = os.path.basename(args.checkpoints).split('_ep')[0]
+    base_name = args.checkpoint.split('_ep')[0]
     group_id = base_name.split('-')[-1]
 
     wandb.init(
@@ -357,8 +362,7 @@ def main():
         name=f"test_{args.model_name}_{wandb_id[:6]}",
         id=wandb_id,
         config={
-            #"config_file": args.config,
-            "checkpoint_source": args.checkpoints,
+            "checkpoint_source": checkpoint_path,
             "test_batch_size": args.batch_size_theoric,
             "use_static_padding": args.use_static_padding,
             "model_tested": args.model_name
@@ -366,14 +370,14 @@ def main():
         tags=["eval", "final_test", args.model_name, "offline"]
     )
 
-    print(f"Début de l'évaluation : {args.checkpoints}")
+    print(f"Début de l'évaluation : {args.checkpoint}")
 
 
-        # ================= MODEL =================
+    # ================= MODEL =================
     model, _, Dataset_fun = build_model(args)
     model = model.to(device)
     # chargement utilisant le chemin dicté par le fichier json
-    checkpoint = torch.load(args.checkpoints, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=True)
 
@@ -408,7 +412,7 @@ def main():
 
     # évaluation avec le tenseur de seuils
     print("inférence en cours...")
-    labels, binary, probs = evaluate(model, test_loader, device, args.threshold)
+    labels, binary, probs = evaluate(model, test_loader, device, args.threshold, use_amp)
 
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
@@ -447,7 +451,7 @@ def main():
     wandb.run.summary["Accuracy"]        = acc
     wandb.run.summary["Macro_F1"]        = f1
     wandb.run.summary["Challenge_Score"] = challenge
-    wandb.run.summary["checkpoint"]      = args.checkpoints
+    wandb.run.summary["checkpoint"]      = checkpoint_path
 
     # Per-class table
     class_table = wandb.Table(columns=["Class", "Applied_Threshold", "F1", "AUROC", "AUPRC", "Sensitivity", "Specificity"])
@@ -463,7 +467,7 @@ def main():
 
    # ================= SAVE CSV =================
     # On nettoie le nom pour éviter l'extension .pt dans le nom du CSV
-    name = os.path.basename(args.checkpoints).replace('.pt', '')
+    name = args.checkpoint.replace('.pt', '')
 
     output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:

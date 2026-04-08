@@ -29,6 +29,8 @@ import warnings
 # On dit à Python tkt c'est pas grave pour ce warning précis
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
+torch.set_float32_matmul_precision('high')  # Test d'optimisation
+
 
 need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
 
