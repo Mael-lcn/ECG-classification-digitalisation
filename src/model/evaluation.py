@@ -10,6 +10,7 @@ from tqdm import tqdm
 import multiprocessing
 import csv
 
+from model.utils.generate_image import create_image_12leads_perchan
 import wandb
 
 from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
@@ -191,6 +192,12 @@ def evaluate(model, dataloader, device, threshold):
 
     with torch.no_grad():
         for x, y, batch_mask in tqdm(dataloader, desc="[EVAL]"):
+            # x is [1, Batch, Channels, H, W] or [1, Batch, Channels, Length]
+            if x.shape[0] == 1:
+                x = x.squeeze(0)          # [Batch, Channels, ...]
+                y = y.squeeze(0)          # [Batch, Labels]
+                batch_mask = batch_mask.squeeze(0)
+
             x = x.to(device)
             y = y.to(device)
             batch_mask = batch_mask.to(device)
@@ -198,6 +205,9 @@ def evaluate(model, dataloader, device, threshold):
             if x.shape[-1] == 0:
                 print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
+
+            if x.dtype == torch.uint8:
+                x = x.float() / 255.0
 
             #probs = model(x)
             probs = torch.sigmoid(model(x, batch_mask=batch_mask))
@@ -351,7 +361,7 @@ def main():
         name=f"test_{args.model_name}_{wandb_id[:6]}",
         id=wandb_id,
         config={
-            "config_file": args.config,
+            #"config_file": args.config,
             "checkpoint_source": args.checkpoints,
             "test_batch_size": args.batch_size_theoric,
             "use_static_padding": args.use_static_padding,
