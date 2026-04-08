@@ -8,6 +8,7 @@ from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
 from vit import ViT_TimeFreq, ViT_Image
 from dino import DinoTraceTemporal, DinoStockwell
+from mamba import mamba2_time_series
 
 # All dataset
 from TurboDataset import TurboDataset
@@ -19,11 +20,16 @@ from TurboDataset_Img import TurboDataset_Img
 model_classes = [
     CNN, 
     CNN_TimeFreq, 
+
     PatchTST_CrossAtt, 
+
     DinoTraceTemporal, 
     DinoStockwell, 
+
     ViT_TimeFreq,
-    ViT_Image
+    ViT_Image,
+
+    mamba2_time_series
 ]
 
 
