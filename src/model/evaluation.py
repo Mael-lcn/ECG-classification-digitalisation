@@ -12,12 +12,10 @@ import csv
 
 import wandb
 
-from train import required_image
+from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
-
-from TurboDataset import TurboDataset
 from model_factory import get_shared_parser, build_model
 
 
@@ -364,15 +362,31 @@ def main():
 
     print(f"Début de l'évaluation : {args.checkpoints}")
 
+
+        # ================= MODEL =================
+    model, _, Dataset_fun = build_model(args)
+    model = model.to(device)
+    # chargement utilisant le chemin dicté par le fichier json
+    checkpoint = torch.load(args.checkpoints, map_location=device)
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
+    model.load_state_dict(state_dict, strict=True)
+
     # ================= DATASET & DATALOADER =================
     mb_size = args.batch_size_theoric * args.mega_batch_factor
 
-    # Création du Dataset d'entraînement
-    test_ds = TurboDataset(
+    dataset_kwargs = {
+        "batch_size": args.batch_size_accumulat,
+        "mega_batch_size": mb_size,
+        "use_static_padding": args.use_static_padding
+    }
+
+    if Dataset_fun.__name__ == "TurboDataset_Img":
+        dataset_kwargs["generate_img"] = create_image_12leads_together
+
+    # Création du Dataset de test
+    test_ds = Dataset_fun(
         data_path=args.data,
-        batch_size=args.batch_size_accumulat,
-        mega_batch_size=mb_size,
-        use_static_padding=args.use_static_padding
+        **dataset_kwargs
     )
 
     # Création des DataLoaders
@@ -385,14 +399,6 @@ def main():
         persistent_workers=(args.workers > 0), 
         prefetch_factor=2
     )
-
-    # ================= MODEL =================
-    model, _ = build_model(args)
-    model = model.to(device)
-    # chargement utilisant le chemin dicté par le fichier json
-    checkpoint = torch.load(args.checkpoints, map_location=device)
-    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
-    model.load_state_dict(state_dict, strict=True)
 
     # évaluation avec le tenseur de seuils
     print("inférence en cours...")

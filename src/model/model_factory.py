@@ -9,6 +9,10 @@ from PatchTST_CrossAtt import PatchTST_CrossAtt
 from vit import ViT_TimeFreq, ViT_Image
 from dino import DinoTraceTemporal, DinoStockwell
 
+# All dataset
+from TurboDataset import TurboDataset
+from TurboDataset_Img import TurboDataset_Img
+
 
 
 # Defini un registre de tout les modèles
@@ -22,7 +26,10 @@ model_classes = [
     ViT_Image
 ]
 
+
 MODEL_REGISTRY = {cls.__name__: cls for cls in model_classes}
+
+required_image_12l_together = set(['DinoTraceTemporal', 'ViT_Image'])
 
 
 def get_shared_parser():
@@ -126,4 +133,10 @@ def build_model(args_namespace):
     valid_kwargs = {k: v for k, v in args_dict.items() if k in sig.parameters}
 
     print(f"Le modèle: {model_name} à bien été instancié")
-    return ModelClass(**valid_kwargs), valid_kwargs
+
+    if model_name in required_image_12l_together:
+        Dataset_fun = TurboDataset_Img
+    else:
+        Dataset_fun = TurboDataset
+
+    return ModelClass(**valid_kwargs), valid_kwargs, Dataset_fun

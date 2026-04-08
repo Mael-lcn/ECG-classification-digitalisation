@@ -15,8 +15,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # All dataset handler
-from TurboDataset import TurboDataset
-from TurboDataset_Img import TurboDataset_Img
 from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
@@ -33,8 +31,6 @@ warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
 
 need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
-
-required_image_12l_together = set(['DinoTraceTemporal', 'ViT_Image'])
 
 
 
@@ -340,7 +336,7 @@ def run(args, Dataset_fun):
                 print(f"[WANDB] Reprise du run ID : {wandb_id}")
 
     # 4. Créer le model
-    model, valid_kwargs = build_model(args)
+    model, valid_kwargs, Dataset_fun  = build_model(args)
     model = model.to(device)
     model_name = args.model_name
 
@@ -378,7 +374,7 @@ def run(args, Dataset_fun):
         "use_static_padding": args.use_static_padding
     }
 
-    if Dataset_fun == TurboDataset_Img:
+    if Dataset_fun.__name__ == "TurboDataset_Img":
         dataset_kwargs["generate_img"] = create_image_12leads_together
 
     # Création des Datasets
@@ -652,15 +648,10 @@ def main():
 
     args = parser.parse_args()
 
-    if args.model_name in required_image_12l_together:
-        Dataset_fun = TurboDataset_Img
-    else:
-        Dataset_fun = TurboDataset
-
     # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-    run(args, Dataset_fun)
+    run(args)
 
 
 if __name__ == "__main__":
