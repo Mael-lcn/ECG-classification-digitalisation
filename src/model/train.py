@@ -14,9 +14,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-# All dataset handler
-from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
-
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
@@ -338,7 +335,7 @@ def run(args):
                 print(f"[WANDB] Reprise du run ID : {wandb_id}")
 
     # 4. Créer le model
-    model, valid_kwargs, Dataset_fun  = build_model(args)
+    model, valid_kwargs, Dataset_fun, gen_fun = build_model(args)
     model = model.to(device)
     model_name = args.model_name
 
@@ -376,8 +373,8 @@ def run(args):
         "use_static_padding": args.use_static_padding
     }
 
-    if Dataset_fun.__name__ == "TurboDataset_Img":
-        dataset_kwargs["generate_img"] = create_image_12leads_together
+    if gen_fun is not None:
+        dataset_kwargs["generate_img"] = gen_fun
 
     # Création des Datasets
     train_ds = Dataset_fun(

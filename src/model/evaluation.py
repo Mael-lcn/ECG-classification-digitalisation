@@ -12,6 +12,9 @@ import csv
 
 import wandb
 
+project_root = os.path.join(os.path.dirname(__file__), '../..')
+sys.path.append(os.path.abspath(project_root))
+
 from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
@@ -374,7 +377,7 @@ def main():
 
 
     # ================= MODEL =================
-    model, _, Dataset_fun = build_model(args)
+    model, _, Dataset_fun, gen_fun = build_model(args)
     model = model.to(device)
     # chargement utilisant le chemin dicté par le fichier json
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -390,8 +393,8 @@ def main():
         "use_static_padding": args.use_static_padding
     }
 
-    if Dataset_fun.__name__ == "TurboDataset_Img":
-        dataset_kwargs["generate_img"] = create_image_12leads_together
+    if gen_fun is not None:
+        dataset_kwargs["generate_img"] = gen_fun
 
     # Création du Dataset de test
     test_ds = Dataset_fun(
