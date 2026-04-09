@@ -15,10 +15,6 @@ import wandb
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from utils.generate_image import create_image_12leads_together, create_image_12leads_perchan
-
-project_root = os.path.join(os.path.dirname(__file__), '../..')
-sys.path.append(os.path.abspath(project_root))
 from model_factory import get_shared_parser, build_model
 
 
