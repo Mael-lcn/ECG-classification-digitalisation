@@ -68,7 +68,7 @@ def create_image_12leads_together(tracings, h=512, w=512, segment_size=1000, sca
 
     # Si mode N&B, on simule les 3 canaux virtuellement
     if not rgb:
-        final_tensor = final_tensor.expand(-1, -1, 3, -1, -1)
+        final_tensor = final_tensor.expand(-1, -1, 3, -1, -1).clone()
 
     return final_tensor # Retourne du uint8
 

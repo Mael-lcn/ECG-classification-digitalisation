@@ -126,9 +126,10 @@ def train_one_epoch(
     device, 
     epoch, 
     total_epochs, 
-    use_amp, 
+    use_amp,
+    amp_dtype,
     batch_size_theoric=64, 
-    batch_size_accumulat=64
+    batch_size_accumulat=64,
 ):
     """
     Exécute une époque d'entraînement avec accumulation de gradients (Gradient Accumulation).
@@ -173,9 +174,9 @@ def train_one_epoch(
         batch_mask = batch_mask.to(device, non_blocking=True)
 
         # 1. Forward Pass avec AMP
-        with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
+        with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
             predictions = model(tracings, batch_mask=batch_mask)
-    
+
             # Important : On divise la loss par accumulation_steps car backward() 
             # additionne les gradients. Cette division garantit que le gradient 
             # final correspond à la moyenne sur batch_size_theoric
@@ -220,7 +221,7 @@ def train_one_epoch(
 
 
 
-def validate(model, dataloader, criterion, device, use_amp, epoch):
+def validate(model, dataloader, criterion, device, use_amp, dtype, epoch):
     """
     Évalue le modèle sur le jeu de validation en mode inférence.
 
@@ -251,7 +252,7 @@ def validate(model, dataloader, criterion, device, use_amp, epoch):
             targets = targets.to(device, non_blocking=True)
             batch_mask = batch_mask.to(device, non_blocking=True)
 
-            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
+            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=dtype):
                 predictions = model(tracings, batch_mask=batch_mask)
                 loss = criterion(predictions, targets)
 
@@ -306,7 +307,22 @@ def run(args):
 
         device = torch.device(f"cuda:{args.gpu}")
         use_amp = not args.not_use_amp
+
+        if use_amp and torch.cuda.is_bf16_supported():
+            amp_dtype = torch.bfloat16
+            print("Matériel compatible détecté (Ampere+) : BFloat16 activé !")
+        else:
+            amp_dtype = torch.float16
+            print("BFloat16 non supporté sur ce GPU : Fallback sur Float16.")
+
+        # Mode bench pour conv rapide
         torch.backends.cudnn.benchmark = args.use_static_padding
+
+        # Gère flash attention test dans cette ordre qui correspond aux implémentations les plus rapides
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+
         print(f"[INIT] Mode: CUDA AMP is {use_amp}")
     else:
         device = torch.device("cpu")
@@ -451,7 +467,7 @@ def run(args):
     print(f"[INIT] Params Backbone: {len(backbone_params)} | Params Head: {len(head_params)}")
     print(f"[INIT] Backbone LR Factor: {args.backbone_lr}")
 
-    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
+    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay, fused=True)
 
     # MODIFIED: Build criterion with optional pos_weight
     pos_weight_tensor = load_pos_weight(
@@ -463,7 +479,7 @@ def run(args):
     # BCEWithLogitsLoss accepts pos_weight=None natively (falls back to no weighting)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
 
-    scaler_amp = torch.amp.GradScaler('cuda') if use_amp else None
+    scaler_amp = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
     # 7. Logique de Reprise
     start_epoch = 1
@@ -500,7 +516,7 @@ def run(args):
         # A. Train
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, 
-            scaler_amp, device, epoch, args.epochs, use_amp, args.batch_size_theoric, args.batch_size_accumulat
+            scaler_amp, device, epoch, args.epochs, use_amp, amp_dtype, args.batch_size_theoric, args.batch_size_accumulat
         )
 
         # Calcul temps & débit
@@ -517,8 +533,8 @@ def run(args):
         }
 
         # B. Validation
-        if epoch >= 15:
-            val_loss = validate(model, val_loader, criterion, device, use_amp, epoch)
+        if epoch >= args.val_start_epoch:
+            val_loss = validate(model, val_loader, criterion, device, use_amp, amp_dtype, epoch)
             metrics["val/loss"] = val_loss
 
             # C. Si la val a fonctionnée
@@ -528,7 +544,7 @@ def run(args):
                     previous = best_val_loss
                     best_val_loss = val_loss
                     stagnation_counter = 0
-                    
+
                     # Supprime l'ancienne best
                     old_files = glob.glob(os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt"))
                     for f in old_files:
@@ -630,7 +646,7 @@ def main():
     parser.add_argument('--backbone_lr', type=float, default=1e-6, help="Learning Rate initial for the backbone")
     parser.add_argument('--weight_decay', type=float, default=1e-4, help="pénaliter pour la régularisation du model")
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
-
+    parser.add_argument('--val_start_epoch', type=int, default=15, help="epoch ou commencer la validation")
 
     # Arguments Système
     parser.add_argument('--resume_from', type=str, default=None, 
