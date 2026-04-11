@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torchmetrics.classification import MultilabelAveragePrecision
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
@@ -218,7 +219,7 @@ def train_one_epoch(
 
 
 
-def validate(model, dataloader, criterion, device, use_amp, dtype, epoch):
+def validate(model, dataloader, device, use_amp, dtype, epoch, pr_auc_metric):
     """
     Évalue le modèle sur le jeu de validation en mode inférence.
 
@@ -239,8 +240,7 @@ def validate(model, dataloader, criterion, device, use_amp, dtype, epoch):
     """
     model.eval()
     loop = tqdm(dataloader, desc=f"Ep {epoch} [VAL]")
-    total_loss = 0
-    count = 0
+    pr_auc_metric.reset()
 
     with torch.no_grad():
         for batch in loop:
@@ -250,28 +250,27 @@ def validate(model, dataloader, criterion, device, use_amp, dtype, epoch):
             batch_mask = batch_mask.to(device, non_blocking=True)
 
             with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=dtype):
-                predictions = model(tracings, batch_mask=batch_mask)
-                loss = criterion(predictions, targets)
+                logits = model(tracings, batch_mask=batch_mask)
 
-            loss_val = loss.item()
+                if not torch.isfinite(logits).all():
+                    print(f"\n    [WARNING] NaNs ou Infs détectés dans les prédictions (Ep {epoch}).")
+                    wandb.log({"errors/val_nan_warning": epoch})
+                    # On renvoie 0.0 car c'est le pire PR-AUC possible
+                    return 0.0 
 
-            # Vérification Mathématique
-            if math.isfinite(loss_val):
-                total_loss += loss_val
-                count += 1
-                loop.set_postfix(val_loss=f"{total_loss/count:.4f}")
-            else:
-                try:
-                    crash_table = wandb.Table(
-                        columns=["Epoch", "Loss", "Targets Sample"],
-                        data=[[epoch, loss_val, str(targets[0].tolist())]]
-                    )
-                    wandb.log({"errors/val_crash_report": crash_table})
-                except Exception:
-                    pass
+                probs = torch.sigmoid(logits)
 
-    # Si count > 0, on retourne la moyenne. Sinon, on retourne l'INFINI
-    return total_loss / count if count > 0 else float('inf')
+            pr_auc_metric.update(probs, targets.long())
+
+    # Calcul final de la métrique
+    val_pr_auc = pr_auc_metric.compute().item()
+
+    # Vérifie que le calcul de la métrique est bon
+    if math.isfinite(val_pr_auc):
+        return val_pr_auc
+    else:
+        print(f"\n    [WARNING] Le PR-AUC calculé est invalide: {val_pr_auc}. Ignoré.")
+        return 0.0
 
 
 
@@ -375,7 +374,7 @@ def run(args):
         f.write(wandb.run.id)
 
     # Définition des axes pour des graphiques cohérents
-    wandb.define_metric("val/loss", step_metric="epoch")
+    wandb.define_metric("val/pr_auc", step_metric="epoch")
     wandb.define_metric("train/loss", step_metric="epoch")
     wandb.define_metric("perf/*", step_metric="epoch")
 
@@ -480,14 +479,14 @@ def run(args):
 
     # 7. Logique de Reprise
     start_epoch = 1
-    best_val_loss = float('inf')
+    best_val_pr_auc = -1
 
     # Si reprise WandB, on tente de récupérer le meilleur score connu
-    if wandb.run.summary.get("best_val_loss"):
-        saved_best = wandb.run.summary["best_val_loss"]
+    if wandb.run.summary.get("best_val_pr_auc"):
+        saved_best = wandb.run.summary["best_val_pr_auc"]
         if isinstance(saved_best, (int, float)) and math.isfinite(saved_best):
-            best_val_loss = saved_best
-            print(f"[RESUME] Best score précédent récupéré de WandB: {best_val_loss}")
+            best_val_pr_auc = saved_best
+            print(f"[RESUME] Best score précédent récupéré de WandB: {best_val_pr_auc}")
 
     if args.resume_from and os.path.exists(args.resume_from):
         print(f"[RESUME] Chargement des poids depuis : {args.resume_from}")
@@ -501,6 +500,7 @@ def run(args):
         if match:
             start_epoch = int(match.group(1)) + 1
 
+    pr_auc_metric = MultilabelAveragePrecision(num_labels=27, average='macro').to(device)
 
     # 8.Boucle des epochs
     print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs}")
@@ -531,15 +531,15 @@ def run(args):
 
         # B. Validation
         if epoch >= args.val_start_epoch:
-            val_loss = validate(model, val_loader, criterion, device, use_amp, amp_dtype, epoch)
-            metrics["val/loss"] = val_loss
+            pr_auc = validate(model, val_loader, device, use_amp, amp_dtype, epoch, pr_auc_metric)
+            metrics["val/pr_auc"] = pr_auc
 
             # C. Si la val a fonctionnée
-            if math.isfinite(val_loss):
+            if math.isfinite(pr_auc):
                 # C.1 Nouveau Record
-                if val_loss < best_val_loss:
-                    previous = best_val_loss
-                    best_val_loss = val_loss
+                if pr_auc > best_val_pr_auc:
+                    previous = best_val_pr_auc
+                    best_val_pr_auc = pr_auc
                     stagnation_counter = 0
 
                     # Supprime l'ancienne best
@@ -555,15 +555,15 @@ def run(args):
                     torch.save(model.state_dict(), save_path)
 
                     # Mise à jour du résumé WandB
-                    wandb.run.summary["best_val_loss"] = best_val_loss
+                    wandb.run.summary["best_val_pr_auc"] = best_val_pr_auc
                     wandb.run.summary["best_epoch"] = epoch
 
-                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_loss:.4f} (Saved)")
+                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_pr_auc:.4f} (Saved)")
 
                 # C.2 Pas d'amélioration
                 else:
                     stagnation_counter += 1
-                    print(f"    [PATIENCE] {stagnation_counter}/{args.patience} (Best: {best_val_loss:.4f})")
+                    print(f"    [PATIENCE] {stagnation_counter}/{args.patience} (Best: {best_val_pr_auc:.4f})")
 
                     # Early Stopping
                     if stagnation_counter >= args.patience:
@@ -572,7 +572,7 @@ def run(args):
                         break
 
             else:
-                print(f"    [WARNING] Val Loss invalide ({val_loss}). Ignoré.")
+                print(f"    [WARNING] Val pr_auc invalide ({pr_auc}). Ignoré.")
 
         # D. Backup Périodique
         if epoch % 5 == 0:
@@ -614,7 +614,7 @@ def run(args):
         print(f"[WANDB] ERREUR : Aucun modèle trouvé pour le pattern {search_pattern}")
 
     wandb.finish()
-    print(f"[FIN] Terminé en {total_duration_hours:.2f} heures. Best Loss: {best_val_loss}")
+    print(f"[FIN] Terminé en {total_duration_hours:.2f} heures. Best PR-AUC: {best_val_pr_auc}")
 
 
 

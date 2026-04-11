@@ -184,7 +184,7 @@ def compute_challenge_metric(weights, labels, outputs, classes, sinus_rhythm):
     return normalized_score
 
 
-def evaluate(model, dataloader, device, threshold, use_amp):
+def evaluate(model, dataloader, device, threshold, use_amp, amp_dtype):
     model.eval()
     all_labels, all_probs, all_binary = [], [], []
 
@@ -204,7 +204,7 @@ def evaluate(model, dataloader, device, threshold, use_amp):
                 print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
                 continue # Passe à l'ECG suivant au lieu de faire crash le modèle
 
-            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
+            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
                 probs = torch.sigmoid(model(x, batch_mask=batch_mask))
 
             binary = (probs >= threshold).int()
@@ -319,7 +319,31 @@ def main():
 
     use_amp = not args.not_use_amp
 
-    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        # Nettoyage mémoire préventif
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+        # Assignation du device
+        device = torch.device(f"cuda:{args.gpu}")
+
+        # 3. Optimisations d'Attention PyTorch 2.0+
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+
+        # 4. Choix de la précision (BFloat16 vs Float16)
+        if use_amp and torch.cuda.is_bf16_supported():
+            amp_dtype = torch.bfloat16
+            print(f"[INIT] Mode: CUDA ({device}) | Matériel Ampere+ : BFloat16 activé")
+        else:
+            amp_dtype = torch.float16
+            print(f"[INIT] Mode: CUDA ({device}) | Fallback : Float16 (AMP={use_amp})")
+    else:
+        # Fallback total sur CPU
+        device = torch.device("cpu")
+        amp_dtype = torch.float16 
+        print("[INIT] Mode: CPU | Optimisations CUDA désactivées")
 
     # Load classes
     with open(args.class_map) as f:
@@ -411,7 +435,7 @@ def main():
 
     # évaluation avec le tenseur de seuils
     print("inférence en cours...")
-    labels, binary, probs = evaluate(model, test_loader, device, args.threshold, use_amp)
+    labels, binary, probs = evaluate(model, test_loader, device, args.threshold, use_amp, amp_dtype)
 
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
