@@ -500,7 +500,7 @@ def run(args):
         if match:
             start_epoch = int(match.group(1)) + 1
 
-    pr_auc_metric = MultilabelAveragePrecision(num_labels=27, average='macro').to(device)
+    pr_auc_metric = MultilabelAveragePrecision(num_labels=args.num_classes, average='macro').to(device)
 
     # 8.Boucle des epochs
     print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs}")

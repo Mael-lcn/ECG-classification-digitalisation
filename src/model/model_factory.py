@@ -42,6 +42,7 @@ model_classes = [
 
 DATASET_MAPPING = {
     'ViT_Image': (TurboDataset_Img, create_image_12leads_perchan),
+    #'DinoStockwell': (TurboDataset_Img, create_image_12leads_perchan),
     'DinoTraceTemporal': (TurboDataset_Img, create_image_12leads_together),
     'DEFAULT': (TurboDataset, None)
 }
