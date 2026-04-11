@@ -35,7 +35,7 @@ class DinoStockwell(nn.Module):
 
         self.embed_dim = self.backbone.config.hidden_size
 
-        self.max_chunks = 13
+        self.max_chunks = 20
         self.pos_embedding = nn.Parameter(torch.randn(1, self.max_chunks, self.embed_dim))
 
         encoder_layer = nn.TransformerEncoderLayer(
