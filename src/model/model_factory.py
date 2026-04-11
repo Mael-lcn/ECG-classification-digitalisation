@@ -2,10 +2,18 @@ import argparse
 import inspect
 import multiprocessing
 
+import os
+import sys
+
 # All models
 from Cnn import CNN
 from Cnn_TimeFreq import CNN_TimeFreq
 from PatchTST_CrossAtt import PatchTST_CrossAtt
+
+project_root = os.path.join(os.path.dirname(__file__), '..')
+sys.path.append(os.path.abspath(project_root))
+
+from model.utils.generate_image import create_image_12leads_perchan, create_image_12leads_together
 from vit import ViT_TimeFreq, ViT_Image
 from dino import DinoTraceTemporal, DinoStockwell
 from mamba import mamba2_time_series
@@ -32,10 +40,14 @@ model_classes = [
     mamba2_time_series
 ]
 
+DATASET_MAPPING = {
+    'ViT_Image': (TurboDataset_Img, create_image_12leads_perchan),
+    'DinoTraceTemporal': (TurboDataset_Img, create_image_12leads_together),
+    'DEFAULT': (TurboDataset, None)
+}
+
 
 MODEL_REGISTRY = {cls.__name__: cls for cls in model_classes}
-
-required_image_12l_together = set(['DinoTraceTemporal', 'ViT_Image'])
 
 
 def get_shared_parser():
@@ -141,10 +153,8 @@ def build_model(args_namespace):
     valid_kwargs = {k: v for k, v in args_dict.items() if k in sig.parameters}
 
     print(f"Le modèle: {model_name} à bien été instancié")
+    
+    dataset_info = DATASET_MAPPING.get(model_name, DATASET_MAPPING['DEFAULT'])
+    Dataset_fun, gen_fun = dataset_info
 
-    if model_name in required_image_12l_together:
-        Dataset_fun = TurboDataset_Img
-    else:
-        Dataset_fun = TurboDataset
-
-    return ModelClass(**valid_kwargs), valid_kwargs, Dataset_fun
+    return ModelClass(**valid_kwargs), valid_kwargs, Dataset_fun, gen_fun
