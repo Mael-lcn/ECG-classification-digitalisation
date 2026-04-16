@@ -292,6 +292,14 @@ def load_weights(weights_file):
     return classes, weights
 
 
+def round_val(val, digits=5):
+    try:
+        if val is not None and np.isfinite(val):
+            return round(float(val), digits)
+        return val
+    except:
+        return val
+
 
 def main():
         # On récupère le parser de base
@@ -469,21 +477,21 @@ def main():
     wandb.log(metrics)
 
     # Summary (visible at first glance on dashboard)
-    wandb.run.summary["AUROC"]           = auroc
-    wandb.run.summary["AUPRC"]           = auprc
-    wandb.run.summary["Accuracy"]        = acc
-    wandb.run.summary["Macro_F1"]        = f1
-    wandb.run.summary["Challenge_Score"] = challenge
+    wandb.run.summary["AUROC"]           = round_val(auroc)
+    wandb.run.summary["AUPRC"]           = round_val(auprc)
+    wandb.run.summary["Accuracy"]        = round_val(acc)
+    wandb.run.summary["Macro_F1"]        = round_val(f1)
+    wandb.run.summary["Challenge_Score"] = round_val(challenge)
     wandb.run.summary["checkpoint"]      = checkpoint_path
 
     # Per-class table
     class_table = wandb.Table(columns=["Class", "Applied_Threshold", "F1", "AUROC", "AUPRC", "Sensitivity", "Specificity"])
     for i, cls in enumerate(classes):
-        f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else None
-        auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else None
-        auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else None
-        sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else None
-        spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else None
+        f1_val    = round_val(f1_c[i])
+        auroc_val = round_val(auroc_c[i])
+        auprc_val = round_val(auprc_c[i])
+        sens_val  = round_val(sensitivity[i])
+        spec_val  = round_val(specificity[i])
         class_table.add_data(cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val)
     wandb.log({"eval/per_class_metrics": class_table})
 
@@ -496,7 +504,10 @@ def main():
     with open(output_csv, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['AUROC', 'AUPRC', 'Accuracy', 'Macro_F1', 'Challenge_Score'])
-        writer.writerow([auroc, auprc, acc, f1, challenge])
+        writer.writerow([
+            round_val(auroc), round_val(auprc), round_val(acc), 
+            round_val(f1), round_val(challenge)
+        ])
     print(f"Overall metrics saved to {output_csv}")
 
     output_csv_per_class = os.path.join(args.output, f"{name}_metrics_per_class.csv")
@@ -504,13 +515,15 @@ def main():
         writer = csv.writer(f)
         writer.writerow(['Class', 'Applied_Threshold', 'F1', 'AUROC', 'AUPRC', 'Sensitivity', 'Specificity'])
         for i, cls in enumerate(classes):
-            f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else 'nan'
-            auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else 'nan'
-            auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else 'nan'
-            sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else 'nan'
-            spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else 'nan'
-            writer.writerow([cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val])
-
+            writer.writerow([
+                cls, 
+                args.threshold, 
+                round_val(f1_c[i]), 
+                round_val(auroc_c[i]), 
+                round_val(auprc_c[i]), 
+                round_val(sensitivity[i]), 
+                round_val(specificity[i])
+            ])
     print(f"Per-class metrics saved to {output_csv_per_class}")
 
     # ================= ARTIFACT UPLOAD  =================
