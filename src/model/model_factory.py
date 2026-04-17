@@ -6,8 +6,10 @@ import os
 import sys
 
 # All models
-from Cnn import CNN
-from Cnn_TimeFreq import CNN_TimeFreq
+from model.cnn.Cnn import CNN
+from model.cnn.Cnn_TimeFreq import CNN_TimeFreq
+from model.cnn.Cnn_Image import CNN_Image
+
 from PatchTST_CrossAtt import PatchTST_CrossAtt
 
 project_root = os.path.join(os.path.dirname(__file__), '..')
@@ -27,7 +29,8 @@ from TurboDataset_Img import TurboDataset_Img
 # Defini un registre de tout les modèles
 model_classes = [
     CNN, 
-    CNN_TimeFreq, 
+    CNN_TimeFreq,
+    CNN_Image,
 
     PatchTST_CrossAtt, 
 
@@ -41,6 +44,7 @@ model_classes = [
 ]
 
 DATASET_MAPPING = {
+    'CNN_Image': (TurboDataset_Img, create_image_12leads_perchan),
     'ViT_Image': (TurboDataset_Img, create_image_12leads_perchan),
     #'DinoStockwell': (TurboDataset_Img, create_image_12leads_perchan),
     'DinoTraceTemporal': (TurboDataset_Img, create_image_12leads_together),
