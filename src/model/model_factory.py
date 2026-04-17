@@ -5,15 +5,15 @@ import multiprocessing
 import os
 import sys
 
+project_root = os.path.join(os.path.dirname(__file__), '..')
+sys.path.append(os.path.abspath(project_root))
+
 # All models
 from model.cnn.Cnn import CNN
 from model.cnn.Cnn_TimeFreq import CNN_TimeFreq
 from model.cnn.Cnn_Image import CNN_Image
 
 from PatchTST_CrossAtt import PatchTST_CrossAtt
-
-project_root = os.path.join(os.path.dirname(__file__), '..')
-sys.path.append(os.path.abspath(project_root))
 
 from model.utils.generate_image import create_image_12leads_perchan, create_image_12leads_together
 from vit import ViT_TimeFreq, ViT_Image
