@@ -41,6 +41,9 @@ class CNN_Image(nn.Module):
 
     def forward(self, x, batch_mask=None):
         """ x.shape: (Batch, 12, H, W) """
+
+        if x.dtype == torch.uint8:
+            x = x.to(next(self.parameters()).dtype) / 255.0
         
         # Square or Rectangle
         x = F.relu(self.bn1(self.conv1(x)))
