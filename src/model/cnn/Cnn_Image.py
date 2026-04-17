@@ -39,7 +39,7 @@ class CNN_Image(nn.Module):
             nn.Linear(256, num_classes)
         )
 
-    def forward(self, x):
+    def forward(self, x, batch_mask=None):
         """ x.shape: (Batch, 12, H, W) """
         
         # Square or Rectangle
