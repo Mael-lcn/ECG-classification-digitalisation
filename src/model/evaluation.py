@@ -213,9 +213,9 @@ def evaluate(model, dataloader, device, threshold, use_amp, amp_dtype):
             all_probs.append(probs.cpu())
             all_binary.append(binary.cpu())
 
-    labels = torch.cat(all_labels).float().numpy().astype(bool)
-    probs = torch.cat(all_probs).float().numpy()
-    binary = torch.cat(all_binary).float().numpy().astype(bool)
+    labels = torch.cat(all_labels).numpy().astype(bool)
+    probs = torch.cat(all_probs).cpu().float().numpy()
+    binary = torch.cat(all_binary).numpy().astype(bool)
 
     return labels, binary, probs
 
@@ -292,6 +292,14 @@ def load_weights(weights_file):
 
     return classes, weights
 
+
+def round_val(val, digits=5):
+    try:
+        if val is not None and np.isfinite(val):
+            return round(float(val), digits)
+        return val
+    except:
+        return val
 
 
 def main():
@@ -397,7 +405,7 @@ def main():
     print(f"Début de l'évaluation : {args.checkpoint}")
 
 
-    # ================= MODEL =================
+    # MODEL
     model, _, Dataset_fun, gen_fun = build_model(args)
     model = model.to(device)
     # chargement utilisant le chemin dicté par le fichier json
@@ -405,7 +413,7 @@ def main():
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
     model.load_state_dict(state_dict, strict=True)
 
-    # ================= DATASET & DATALOADER =================
+    # DATASET & DATALOADER
     mb_size = args.batch_size_theoric * args.mega_batch_factor
 
     dataset_kwargs = {
@@ -437,13 +445,46 @@ def main():
     # évaluation avec le tenseur de seuils
     print("inférence en cours...")
     labels, binary, probs = evaluate(model, test_loader, device, args.threshold, use_amp, amp_dtype)
-
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
+    # per-class metrics plots based on different thresholds 
+    print('Debut de la balayage de seuil (0.1 to 0.5)...')
+    thresholds = np.linspace(0.1, 0.5, 9) # [0.1, 0.15, 0.2, ..., 0.5]
+    sweep_table = wandb.Table(columns=[
+        "Threshold", "Class", "F1", "AUROC", "AUPRC", 
+        "Sensitivity", "Specificity", "Accuracy", "Challenge_Score"
+    ])
+    for t in thresholds:
+        t_round = round(float(t), 2)
+        binary_t = (probs >= t_round).astype(bool)
+        A_t = compute_confusion_matrices(labels, binary_t)
+        f1, f1_c = compute_f_measure(labels, binary_t)
+        current_acc = compute_accuracy(labels, binary_t)
+        current_challenge = compute_challenge_metric(weights, labels, binary_t, classes, "NSR")
+        for i, cls in enumerate(classes):
+            tp, fp, fn, tn = A_t[i,1,1], A_t[i,1,0], A_t[i,0,1], A_t[i,0,0]
+            
+            sens_val = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            spec_val = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            
+            sweep_table.add_data(
+                t_round,
+                cls,
+                round_val(f1_c[i]),
+                round_val(auroc_c[i]),
+                round_val(auprc_c[i]),
+                round_val(sens_val),
+                round_val(spec_val),
+                round_val(current_acc), # Global metric at this threshold
+                round_val(current_challenge) # Global metric at this threshold
+            )
+
+    wandb.log({"eval/threshold_sweep": sweep_table})
+
     print('- Accuracy...')
-    acc = compute_accuracy(labels, binary)
+    final_acc = compute_accuracy(labels, binary)
     print('- F-measure...')
-    f1, f1_c = compute_f_measure(labels, binary)
+    final_f1, final_f1_c = compute_f_measure(labels, binary)
 
     A = compute_confusion_matrices(labels, binary)
     # Per-class sensitivity (recall) and specificity
@@ -451,40 +492,40 @@ def main():
     specificity = np.zeros(len(classes))
     for k in range(len(classes)):
         tp, fp, fn, tn = A[k,1,1], A[k,1,0], A[k,0,1], A[k,0,0]
-        sensitivity[k] = tp / (tp + fn) if (tp + fn) > 0 else float('nan')
-        specificity[k] = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
+        sensitivity[k] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        specificity[k] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
     print('- Challenge metric...')
-    challenge = compute_challenge_metric(weights, labels, binary, classes, "NSR")
+    final_challenge = compute_challenge_metric(weights, labels, binary, classes, "NSR")
     print('Done.')
 
     # ================= LOGGING WANDB =================
     # Global metrics
     metrics = {
-        "eval/AUROC":           auroc,
-        "eval/AUPRC":           auprc,
-        "eval/Accuracy":        acc,
-        "eval/Macro_F1":        f1,
-        "eval/Challenge_Score": challenge,
+        "eval/AUROC":           round_val(auroc),
+        "eval/AUPRC":           round_val(auprc),
+        "eval/Accuracy":        round_val(final_acc),
+        "eval/Macro_F1":        round_val(final_f1),
+        "eval/Challenge_Score": round_val(final_challenge),
     }
     wandb.log(metrics)
 
     # Summary (visible at first glance on dashboard)
-    wandb.run.summary["AUROC"]           = auroc
-    wandb.run.summary["AUPRC"]           = auprc
-    wandb.run.summary["Accuracy"]        = acc
-    wandb.run.summary["Macro_F1"]        = f1
-    wandb.run.summary["Challenge_Score"] = challenge
+    wandb.run.summary["AUROC"]           = round_val(auroc)
+    wandb.run.summary["AUPRC"]           = round_val(auprc)
+    wandb.run.summary["Accuracy"]        = round_val(final_acc)
+    wandb.run.summary["Macro_F1"]        = round_val(final_f1)
+    wandb.run.summary["Challenge_Score"] = round_val(final_challenge)
     wandb.run.summary["checkpoint"]      = checkpoint_path
 
     # Per-class table
     class_table = wandb.Table(columns=["Class", "Applied_Threshold", "F1", "AUROC", "AUPRC", "Sensitivity", "Specificity"])
     for i, cls in enumerate(classes):
-        f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else None
-        auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else None
-        auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else None
-        sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else None
-        spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else None
+        f1_val    = round_val(final_f1_c[i])
+        auroc_val = round_val(auroc_c[i])
+        auprc_val = round_val(auprc_c[i])
+        sens_val  = round_val(sensitivity[i])
+        spec_val  = round_val(specificity[i])
         class_table.add_data(cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val)
     wandb.log({"eval/per_class_metrics": class_table})
 
@@ -497,7 +538,10 @@ def main():
     with open(output_csv, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['AUROC', 'AUPRC', 'Accuracy', 'Macro_F1', 'Challenge_Score'])
-        writer.writerow([auroc, auprc, acc, f1, challenge])
+        writer.writerow([
+            round_val(auroc), round_val(auprc), round_val(final_acc), 
+            round_val(final_f1), round_val(final_challenge)
+        ])
     print(f"Overall metrics saved to {output_csv}")
 
     output_csv_per_class = os.path.join(args.output, f"{name}_metrics_per_class.csv")
@@ -505,13 +549,15 @@ def main():
         writer = csv.writer(f)
         writer.writerow(['Class', 'Applied_Threshold', 'F1', 'AUROC', 'AUPRC', 'Sensitivity', 'Specificity'])
         for i, cls in enumerate(classes):
-            f1_val    = float(f1_c[i])    if np.isfinite(f1_c[i])    else 'nan'
-            auroc_val = float(auroc_c[i]) if np.isfinite(auroc_c[i]) else 'nan'
-            auprc_val = float(auprc_c[i]) if np.isfinite(auprc_c[i]) else 'nan'
-            sens_val = float(sensitivity[i]) if np.isfinite(sensitivity[i]) else 'nan'
-            spec_val = float(specificity[i]) if np.isfinite(specificity[i]) else 'nan'
-            writer.writerow([cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val])
-
+            writer.writerow([
+                cls, 
+                args.threshold, 
+                round_val(final_f1_c[i]), 
+                round_val(auroc_c[i]), 
+                round_val(auprc_c[i]), 
+                round_val(sensitivity[i]), 
+                round_val(specificity[i])
+            ])
     print(f"Per-class metrics saved to {output_csv_per_class}")
 
     # ================= ARTIFACT UPLOAD  =================

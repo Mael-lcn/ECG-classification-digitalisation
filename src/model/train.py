@@ -757,7 +757,7 @@ def main():
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")
 
-    # NEW ARGUMENT for pos_weight per class
+    # Argumentspos_weight per class
     parser.add_argument(
         '--pos_weight_path', type=str, default="../ressources/pos_weight.pt",
         help=(
@@ -766,6 +766,10 @@ def main():
             "If omitted, BCEWithLogitsLoss runs without class weighting."
         )
     )
+
+    # Argument for Cnn Image
+    parser.add_argument('--cnn_mode', type=str, default='square', choices=['square', 'rectangle'],
+                        help="Mode for CNN_Image: 'square' (3x3) or 'rectangle' (half-height)")
 
     args = parser.parse_args()
 
