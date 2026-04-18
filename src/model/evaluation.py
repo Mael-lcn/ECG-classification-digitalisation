@@ -442,45 +442,10 @@ def main():
         prefetch_factor=2
     )
 
-    # évaluation avec le tenseur de seuils
     print("inférence en cours...")
     labels, binary, probs = evaluate(model, test_loader, device, args.threshold, use_amp, amp_dtype)
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
-    # per-class metrics plots based on different thresholds 
-    print('Debut de la balayage de seuil (0.1 to 0.5)...')
-    thresholds = np.linspace(0.1, 0.5, 9) # [0.1, 0.15, 0.2, ..., 0.5]
-    sweep_table = wandb.Table(columns=[
-        "Threshold", "Class", "F1", "AUROC", "AUPRC", 
-        "Sensitivity", "Specificity", "Accuracy", "Challenge_Score"
-    ])
-    for t in thresholds:
-        t_round = round(float(t), 2)
-        binary_t = (probs >= t_round).astype(bool)
-        A_t = compute_confusion_matrices(labels, binary_t)
-        f1, f1_c = compute_f_measure(labels, binary_t)
-        current_acc = compute_accuracy(labels, binary_t)
-        current_challenge = compute_challenge_metric(weights, labels, binary_t, classes, "NSR")
-        for i, cls in enumerate(classes):
-            tp, fp, fn, tn = A_t[i,1,1], A_t[i,1,0], A_t[i,0,1], A_t[i,0,0]
-            
-            sens_val = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            spec_val = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-            
-            sweep_table.add_data(
-                t_round,
-                cls,
-                round_val(f1_c[i]),
-                round_val(auroc_c[i]),
-                round_val(auprc_c[i]),
-                round_val(sens_val),
-                round_val(spec_val),
-                round_val(current_acc), # Global metric at this threshold
-                round_val(current_challenge) # Global metric at this threshold
-            )
-
-    wandb.log({"eval/threshold_sweep": sweep_table})
-
     print('- Accuracy...')
     final_acc = compute_accuracy(labels, binary)
     print('- F-measure...')
