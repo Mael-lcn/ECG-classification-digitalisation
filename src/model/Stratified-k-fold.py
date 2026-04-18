@@ -47,27 +47,6 @@ def create_fold(train_path, val_path, eval_path):
 
 
 def run(args):
-    """
-    Orchestre le cycle de vie complet de l'expérience d'entraînement (Pipeline principal).
-
-    Cette fonction configure l'environnement, initialise les composants et gère la boucle d'entraînement.
-    Les étapes clés incluent :
-
-    1. Setup Système : Création des dossiers, configuration de WandB (mode Offline/Online) et 
-    gestion de la reprise (Resume) via ID de run.
-    2. Data Loading : Instanciation du `LargeH5Dataset` et du `MegaBatchSortishSampler` 
-    pour optimiser le débit I/O.
-    3. Optimisation : Compilation du modèle via `torch.compile` (PyTorch 2.0+) et configuration
-    de l'optimiseur AdamW.
-    4. Boucle Train/Val : Exécution séquentielle avec calcul de métriques en temps réel.
-    5. Sauvegarde : Checkpoints périodiques, sauvegarde du "Best Model" sur amélioration de la 
-    validation, et mécanisme d'Early Stopping.
-
-    Args:
-        args (argparse.Namespace): Objet contenant tous les hyperparamètres et configurations 
-        (batch_size, lr, paths, etc.) parsés depuis la ligne de commande.
-    """
-
     # 1. Configuration Matérielle
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
