@@ -213,11 +213,12 @@ def evaluate(model, dataloader, device, threshold, use_amp, amp_dtype):
             all_probs.append(probs.cpu())
             all_binary.append(binary.cpu())
 
-    labels = torch.cat(all_labels).numpy().astype(bool)
-    probs = torch.cat(all_probs).numpy()
-    binary = torch.cat(all_binary).numpy().astype(bool)
+    labels = torch.cat(all_labels).float().numpy().astype(bool)
+    probs = torch.cat(all_probs).float().numpy()
+    binary = torch.cat(all_binary).float().numpy().astype(bool)
 
     return labels, binary, probs
+
 
 """
 Some utility functions for loading tables and weights

@@ -16,7 +16,7 @@ sys.path.append(os.path.abspath(project_root))
 from model.utils.generate_image import create_image_12leads_perchan, create_image_12leads_together
 from vit import ViT_TimeFreq, ViT_Image
 from dino import DinoTraceTemporal, DinoStockwell
-from mamba import mamba2_time_series
+from mamba import Mamba2_time_series
 
 # All dataset
 from TurboDataset import TurboDataset
@@ -37,12 +37,11 @@ model_classes = [
     ViT_TimeFreq,
     ViT_Image,
 
-    mamba2_time_series
+    Mamba2_time_series
 ]
 
 DATASET_MAPPING = {
     'ViT_Image': (TurboDataset_Img, create_image_12leads_perchan),
-    #'DinoStockwell': (TurboDataset_Img, create_image_12leads_perchan),
     'DinoTraceTemporal': (TurboDataset_Img, create_image_12leads_together),
     'DEFAULT': (TurboDataset, None)
 }
@@ -63,17 +62,29 @@ def get_shared_parser():
 
     group_sys.add_argument('--class_map', type=str, default='../../ressources/final_class.json',
                            help="Chemin JSON mappant les indices aux noms de classes")    
-    group_sys.add_argument('-w', '--workers', type=int, default=min(max(4, multiprocessing.cpu_count()-1), 16),
+    group_sys.add_argument('-w', '--workers', type=int, default=min(max(4, multiprocessing.cpu_count()-1), 8),
                            help="Nombre de processus pour charger les données")
     group_sys.add_argument('--gpu', type=int, default=0,
                         help="index du GPU a utiliser (config HPC)")
 
-     # --- 2. Choix du modèle ---
+        # --- 2. Paramètres du dataloading communs ---
+    group_train = parser.add_argument_group("Hyperparamètres Communs du Dataloader/Inférence")
+    group_train.add_argument('--batch_size_theoric', type=int, default=64, help="Taille du batch de MAJ du gradient")
+    group_train.add_argument('--batch_size_accumulat', type=int, default=64, help="Taille du batch d'inference")
+
+    group_train.add_argument('--mega_batch_factor', type=int, default=16,
+                             help="Granularité du tri. Haut = padding optimisé, Bas = + d'aléatoire")
+    group_train.add_argument('--use_static_padding', action='store_true', default=False,
+                             help="Force une taille de padding fixe (universelle)")
+    group_train.add_argument('--not_use_amp', action='store_false', default=False,
+                             help="Désactive l'Automatic Mixed Precision (AMP). Passe en FP32.")
+
+     # --- 3. Choix du modèle ---
     group_model = parser.add_argument_group("Sélection du Modèle")
     group_model.add_argument('-m', '--model_name', type=str, required=True, choices=MODEL_REGISTRY.keys(),
                              help="Nom du modèle à utiliser")
 
-    # --- 3. Architecture partagés par CNN et CNN_TimeFreq ---
+    # --- 4. Architecture partagés par CNN et CNN_TimeFreq ---
     group_arch = parser.add_argument_group("Hyperparamètres de l'Architecture (Communs)")
     group_arch.add_argument('--num_classes', type=int, default=27, help="Nombre de classes de sortie")
     group_arch.add_argument('--in_channels', type=int, default=12, help="Nombre de dérivations ECG (leads)")
@@ -88,31 +99,19 @@ def get_shared_parser():
     group_arch.add_argument('--use_fcnn', action='store_true', default=False,
                             help="Active l'architecture FCNN (fenêtre glissante) au lieu de CNN standard")
 
-    # --- 4. Architecture spécifique : CNN 1D ---
+    # --- 5. Architecture spécifique : CNN 1D ---
     group_cnn1d = parser.add_argument_group("Spécifique au CNN Standard (1D)")
     group_cnn1d.add_argument('--kernel_size', type=int, default=3, help="Taille du kernel de convolution (1D)")
     group_cnn1d.add_argument('--window_size1D', type=int, default=4000, 
                              help="Taille de la fenêtre pour le classifieur FCNN 1D (kernel_size du classifieur)")
 
-    # --- 5. Architecture spécifique : CNN TimeFreq ---
+    # --- 6. Architecture spécifique : CNN TimeFreq ---
     group_timefreq = parser.add_argument_group("Spécifique au CNN Time-Frequency (Spectrogramme)")
     group_timefreq.add_argument('--n_fft', type=int, default=128, help="Points utilisés pour la transformée de Fourier")
     group_timefreq.add_argument('--hop_length', type=int, default=64, help="Pas de glissement de la fenêtre (stride)")
     group_timefreq.add_argument('--win_length', type=int, default=128, help="Taille de la fenêtre en échantillons")
     group_timefreq.add_argument('--window_size2D', type=int, nargs='+', default=[4, 4],
                                 help="Taille de la fenêtre (freq, time) pour le classifieur FCNN 2D. Ex: --window_size_2d 4 4")
-
-    # --- 6. Paramètres du dataloading communs ---
-    group_train = parser.add_argument_group("Hyperparamètres Communs du Dataloader/Inférence")
-    group_train.add_argument('--batch_size_theoric', type=int, default=64, help="Taille du batch de MAJ du gradient")
-    group_train.add_argument('--batch_size_accumulat', type=int, default=64, help="Taille du batch d'inference")
-
-    group_train.add_argument('--mega_batch_factor', type=int, default=16,
-                             help="Granularité du tri. Haut = padding optimisé, Bas = + d'aléatoire")
-    group_train.add_argument('--use_static_padding', action='store_true', default=False,
-                             help="Force une taille de padding fixe (universelle)")
-    group_train.add_argument('--not_use_amp', action='store_false', default=False,
-                             help="Désactive l'Automatic Mixed Precision (AMP). Passe en FP32.")
 
     # --- 7. Architecture spécifique : Transformer (PatchTST) ---
     group_patchtst = parser.add_argument_group("Spécifique au Transformer (PatchTST)")
