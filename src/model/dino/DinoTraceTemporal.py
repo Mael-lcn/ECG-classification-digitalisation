@@ -25,7 +25,7 @@ class DinoTraceTemporal(nn.Module):
         repo_id = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 
         self.backbone = AutoModel.from_pretrained(repo_id, local_files_only=True, attn_implementation="sdpa")        
-        embed_dim = self.backbone.config.hidden_size 
+        embed_dim = self.backbone.config.hidden_size
 
         # Gel total du backbone pour ne pas exploser la RAM
         for param in self.backbone.parameters():

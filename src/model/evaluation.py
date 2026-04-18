@@ -219,6 +219,7 @@ def evaluate(model, dataloader, device, threshold, use_amp, amp_dtype):
 
     return labels, binary, probs
 
+
 """
 Some utility functions for loading tables and weights
 """

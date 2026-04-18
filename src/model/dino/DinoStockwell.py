@@ -14,7 +14,6 @@ class DinoStockwell(nn.Module):
     4. DINO Backbone : Extraction de features visuelles.
     5. Temporal Transformer : Analyse du rythme global entre les segments.
     """
-
     def __init__(self, num_classes=27, n_fft=256, chunk_size=4000):
         super().__init__()
         self.chunk_size = chunk_size
@@ -33,6 +32,9 @@ class DinoStockwell(nn.Module):
             repo_id, local_files_only=True, attn_implementation="sdpa"
         )
 
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
         self.embed_dim = self.backbone.config.hidden_size
 
         self.max_chunks = 20
@@ -48,7 +50,6 @@ class DinoStockwell(nn.Module):
     def _get_stft_image(self, x_chunks_valid):
         """
         Transforme les segments de signal en images RGB 224x224.
-        Gère le passage de 3D à 2D pour satisfaire torch.stft.
         """
         N, L, T = x_chunks_valid.shape
 

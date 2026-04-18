@@ -6,6 +6,7 @@ import math
 from tqdm import tqdm
 import glob
 import shutil
+import warnings
 
 import wandb
 
@@ -19,8 +20,6 @@ project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
 from model_factory import get_shared_parser, build_model
-
-import warnings
 
 
 
@@ -274,6 +273,202 @@ def validate(model, dataloader, device, use_amp, dtype, epoch, pr_auc_metric):
 
 
 
+def run_training_loop(
+    args, 
+    model, 
+    train_loader, 
+    val_loader, 
+    train_ds, 
+    optimizer, 
+    criterion, 
+    scaler_amp, 
+    device, 
+    use_amp, 
+    amp_dtype, 
+    start_epoch, 
+    best_val_pr_auc, 
+    exp_name,
+    model_name,
+    fold=-1
+):
+    """
+    Exécute la boucle d'entraînement principale, avec gestion optionnelle du K-Fold.
+
+    Gère le cycle complet d'entraînement sur plusieurs époques : optimisation,
+    validation, sauvegarde conditionnelle du meilleur modèle (checkpoints), arrêt
+    prématuré (early stopping) et synchronisation des métriques/artefacts avec Weights & Biases.
+
+    Args:
+        args (argparse.Namespace): Hyperparamètres et configuration globale.
+        model (torch.nn.Module): Le modèle de réseau de neurones à entraîner.
+        train_loader (DataLoader): Dataloader pour le jeu d'entraînement.
+        val_loader (DataLoader): Dataloader pour le jeu de validation.
+        train_ds (Dataset): Instance du dataset d'entraînement (utilisé pour le calcul du débit).
+        optimizer (torch.optim.Optimizer): Optimiseur configuré (ex: AdamW).
+        criterion (torch.nn.Module): Fonction de perte (ex: BCEWithLogitsLoss).
+        scaler_amp (torch.amp.GradScaler | None): Scaler pour la précision mixte, ou None.
+        device (torch.device): Appareil cible pour les calculs (CPU ou CUDA).
+        use_amp (bool): Activation de l'Automatic Mixed Precision.
+        amp_dtype (torch.dtype): Type de données pour l'AMP (float16 ou bfloat16).
+        start_epoch (int): Époque de départ (gère la reprise d'entraînement).
+        best_val_pr_auc (float): Meilleur score PR-AUC historique (pour la reprise).
+        exp_name (str): Nom de base généré pour l'expérience courante.
+        model_name (str): Nom de l'architecture du modèle.
+        fold (int, optional): Index du fold actuel. Vaut -1 si non applicable.
+
+    Returns:
+        tuple: (best_val_pr_auc, best_model_path)
+            - best_val_pr_auc (float): Le meilleur score de validation atteint.
+            - best_model_path (str | None): Chemin local vers le fichier des poids du meilleur modèle.
+    """
+    pr_auc_metric = MultilabelAveragePrecision(num_labels=args.num_classes, average='macro').to(device)
+
+    # configuration des préfixes dynamiques pour isoler les métriques en cas de k-fold
+    fold_suffix = f"_fold{fold}" if fold != -1 else ""
+    prefix = f"fold{fold}/" if fold != -1 else "" 
+
+    # isolation wandb : déclaration de l'axe temporel (step) propre à ce run/fold
+    # empêche les graphiques de se chevaucher ou de revenir en arrière lors d'un k-fold
+    wandb.define_metric(f"{prefix}val/pr_auc", step_metric=f"{prefix}epoch")
+    wandb.define_metric(f"{prefix}train/loss", step_metric=f"{prefix}epoch")
+    wandb.define_metric(f"{prefix}perf/*", step_metric=f"{prefix}epoch")
+
+    print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs} {fold_suffix.replace('_', ' ')}")
+    stagnation_counter = 0
+    total_start_time = time.time()
+    
+    # initialisation sécurisée du chemin en cas d'absence d'amélioration ou de crash prématuré
+    best_model_path = None
+
+    # vigilance : vérification préventive d'un modèle déjà existant (cas d'une reprise où l'on ne bat pas le record)
+    existing_models = glob.glob(os.path.join(args.checkpoint_dir, f"best_model_{exp_name}{fold_suffix}_ep*.pt"))
+    if existing_models:
+        best_model_path = existing_models[0]
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        epoch_start = time.time()
+
+        # phase 1 : entraînement
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, criterion, 
+            scaler_amp, device, epoch, args.epochs, use_amp, amp_dtype, 
+            args.batch_size_theoric, args.batch_size_accumulat
+        )
+
+        # calcul des métriques de performance système
+        epoch_duration = time.time() - epoch_start
+        samples_per_sec = len(train_ds) / epoch_duration if epoch_duration > 0 else 0
+
+        # structuration du dictionnaire de log dynamique (avec ou sans préfixe)
+        metrics = {
+            f"{prefix}epoch": epoch,
+            f"{prefix}train/loss": train_loss,
+            f"{prefix}train/lr": optimizer.param_groups[0]['lr'], 
+            f"{prefix}perf/epoch_duration": epoch_duration,
+            f"{prefix}perf/samples_per_sec": samples_per_sec
+        }
+
+        # phase 2 : validation conditionnelle
+        if epoch >= args.val_start_epoch:
+            pr_auc = validate(model, val_loader, device, use_amp, amp_dtype, epoch, pr_auc_metric)
+            metrics[f"{prefix}val/pr_auc"] = pr_auc
+
+            # sécurité contre les instabilités numériques (nans/infs) remontées par la validation
+            if math.isfinite(pr_auc):
+                
+                # cas a : amélioration du modèle (nouveau record)
+                if pr_auc > best_val_pr_auc:
+                    previous = best_val_pr_auc
+                    best_val_pr_auc = pr_auc
+                    stagnation_counter = 0
+
+                    # nettoyage rigoureux des anciens checkpoints pour éviter de saturer le disque
+                    old_files = glob.glob(os.path.join(args.checkpoint_dir, f"best_model_{exp_name}{fold_suffix}_ep*.pt"))
+                    for f in old_files:
+                        try:
+                            os.remove(f)
+                        except OSError as e:
+                            print(f"Erreur lors de la suppression de {f}: {e}")
+
+                    # sauvegarde matérielle du nouvel état du modèle
+                    save_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}{fold_suffix}_ep{epoch}.pt")
+                    torch.save(model.state_dict(), save_path)
+                    best_model_path = save_path
+
+                    # mise à jour directe dans le résumé wandb pour un accès rapide en fin d'expérience
+                    wandb.run.summary[f"best_val_pr_auc{fold_suffix}"] = best_val_pr_auc
+                    wandb.run.summary[f"best_epoch{fold_suffix}"] = epoch
+
+                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_pr_auc:.4f} (Saved)")
+
+                # cas b : absence d'amélioration (gestion de la patience)
+                else:
+                    stagnation_counter += 1
+                    print(f"    [PATIENCE] {stagnation_counter}/{args.patience} (Best: {best_val_pr_auc:.4f})")
+
+                    # déclenchement de l'arrêt prématuré
+                    if stagnation_counter >= args.patience:
+                        print(f"\n[STOP] Early Stopping déclenché (Patience {args.patience} atteinte).")
+                        wandb.log(metrics) # log final avant la rupture de la boucle
+                        break
+
+            else:
+                print(f"    [WARNING] Val pr_auc invalide ({pr_auc}). Ignoré.")
+
+        # phase 3 : sauvegarde de sécurité périodique
+        # permet de reprendre l'entraînement en cas de coupure inattendue du cluster
+        if epoch % 5 == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_val_pr_auc': best_val_pr_auc
+            }
+            if scaler_amp:
+                checkpoint['scaler_state_dict'] = scaler_amp.state_dict()
+
+            torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"backup{fold_suffix}_ep{epoch}.pt"))
+
+        # synchronisation des logs pour l'époque courante
+        wandb.log(metrics)
+
+    # clôture de la boucle : calcul du temps global
+    total_duration_hours = (time.time() - total_start_time) / 3600
+    wandb.run.summary[f"total_train_time_hours{fold_suffix}"] = total_duration_hours
+
+    # phase finale : versionning et upload de l'artefact sur wandb
+    print(f"\n[WANDB] Upload du modèle final ({exp_name}{fold_suffix}) en cours...")
+
+    # vérification stricte de l'existence du fichier avant toute tentative d'upload
+    if best_model_path and os.path.exists(best_model_path):
+        nom_fichier = os.path.basename(best_model_path)
+        print(f"[WANDB] Fichier trouvé : {nom_fichier}")
+
+        # copie vers le répertoire interne wandb pour garantir l'intégrité de l'artefact
+        wandb_internal_path = os.path.join(wandb.run.dir, nom_fichier)
+        shutil.copy2(best_model_path, wandb_internal_path)
+
+        # création du package artefact avec nomenclature unique (évite les écrasements inter-fold)
+        artifact_name = f"model-{model_name}-{wandb.run.id}{fold_suffix}"
+        artifact = wandb.Artifact(artifact_name, type='model')
+        artifact.add_file(wandb_internal_path, name=nom_fichier)
+        wandb.log_artifact(artifact)
+        print("[WANDB] Upload préparé avec succès.")
+    else:
+        # log d'erreur silencieux pour ne pas crasher le script global si l'entraînement a totalement échoué
+        print(f"[WANDB] ERREUR : best_model_path introuvable ou vide.")
+
+    # Affichage final dans le terminal
+    print(f"\n[FIN] Entraînement terminé. Meilleur PR-AUC : {best_val_pr_auc:.4f}")
+
+    # Enregistrement explicite du score final dans WandB 
+    wandb.run.summary[f"final_best_val_pr_auc{fold_suffix}"] = best_val_pr_auc
+
+    return best_model_path
+
+
+
+
 def run(args):
     """
     Orchestre le cycle de vie complet de l'expérience d'entraînement (Pipeline principal).
@@ -483,140 +678,53 @@ def run(args):
     start_epoch = 1
     best_val_pr_auc = -1
 
-    # Si reprise WandB, on tente de récupérer le meilleur score connu
-    if wandb.run.summary.get("best_val_pr_auc"):
+    if args.resume_from and os.path.exists(args.resume_from):
+        print(f"[RESUME] Chargement du checkpoint depuis : {args.resume_from}")
+        checkpoint = torch.load(args.resume_from, map_location=device)
+        
+        # Chargement strict du nouveau format de Checkpoint robuste
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
+        model.load_state_dict(state_dict, strict=False)
+        
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_pr_auc = checkpoint.get('best_val_pr_auc', -1)
+        
+        if scaler_amp and 'scaler_state_dict' in checkpoint:
+            scaler_amp.load_state_dict(checkpoint['scaler_state_dict'])
+            
+        print(f"[RESUME] Reprise confirmée à l'époque {start_epoch} (Best score précédent: {best_val_pr_auc:.4f})")
+
+    # Si reprise WandB SANS args.resume_from
+    elif wandb.run.summary.get("best_val_pr_auc"):
         saved_best = wandb.run.summary["best_val_pr_auc"]
         if isinstance(saved_best, (int, float)) and math.isfinite(saved_best):
             best_val_pr_auc = saved_best
-            print(f"[RESUME] Best score précédent récupéré de WandB: {best_val_pr_auc}")
+            print(f"[RESUME] Best score précédent récupéré de WandB: {best_val_pr_auc:.4f}")
 
-    if args.resume_from and os.path.exists(args.resume_from):
-        print(f"[RESUME] Chargement des poids depuis : {args.resume_from}")
-        checkpoint = torch.load(args.resume_from, map_location=device)
-        # Nettoyage des clés '_orig_mod' si modèle compilé
-        state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
-        model.load_state_dict(state_dict, strict=False)
 
-        # Récupération de l'époque
-        match = re.search(r'ep(\d+)', args.resume_from)
-        if match:
-            start_epoch = int(match.group(1)) + 1
+    # 8. Lancement effectif de la boucle
+    run_training_loop(
+        args=args,
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        train_ds=train_ds,
+        optimizer=optimizer,
+        criterion=criterion,
+        scaler_amp=scaler_amp,
+        device=device,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+        start_epoch=start_epoch,
+        best_val_pr_auc=best_val_pr_auc,
+        exp_name=exp_name,
+        model_name=model_name,
+        fold=-1
+    )
 
-    pr_auc_metric = MultilabelAveragePrecision(num_labels=args.num_classes, average='macro').to(device)
-
-    # 8.Boucle des epochs
-    print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs}")
-    stagnation_counter = 0
-    total_start_time = time.time()
-
-    for epoch in range(start_epoch, args.epochs + 1):
-        epoch_start = time.time()
-
-        # A. Train
-        train_loss = train_one_epoch(
-            model, train_loader, optimizer, criterion, 
-            scaler_amp, device, epoch, args.epochs, use_amp, amp_dtype, args.batch_size_theoric, args.batch_size_accumulat
-        )
-
-        # Calcul temps & débit
-        epoch_duration = time.time() - epoch_start
-        samples_per_sec = len(train_ds) / epoch_duration if epoch_duration > 0 else 0
-
-        # Métriques brutes
-        metrics = {
-            "epoch": epoch,
-            "train/loss": train_loss,
-            "train/lr": optimizer.param_groups[0]['lr'], 
-            "perf/epoch_duration": epoch_duration,
-            "perf/samples_per_sec": samples_per_sec
-        }
-
-        # B. Validation
-        if epoch >= args.val_start_epoch:
-            pr_auc = validate(model, val_loader, device, use_amp, amp_dtype, epoch, pr_auc_metric)
-            metrics["val/pr_auc"] = pr_auc
-
-            # C. Si la val a fonctionnée
-            if math.isfinite(pr_auc):
-                # C.1 Nouveau Record
-                if pr_auc > best_val_pr_auc:
-                    previous = best_val_pr_auc
-                    best_val_pr_auc = pr_auc
-                    stagnation_counter = 0
-
-                    # Supprime l'ancienne best
-                    old_files = glob.glob(os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt"))
-                    for f in old_files:
-                        try:
-                            os.remove(f)
-                        except OSError as e:
-                            print(f"Erreur lors de la suppression de {f}: {e}")
-
-                    # Sauvegarde disque du model
-                    save_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
-                    torch.save(model.state_dict(), save_path)
-
-                    # Mise à jour du résumé WandB
-                    wandb.run.summary["best_val_pr_auc"] = best_val_pr_auc
-                    wandb.run.summary["best_epoch"] = epoch
-
-                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_pr_auc:.4f} (Saved)")
-
-                # C.2 Pas d'amélioration
-                else:
-                    stagnation_counter += 1
-                    print(f"    [PATIENCE] {stagnation_counter}/{args.patience} (Best: {best_val_pr_auc:.4f})")
-
-                    # Early Stopping
-                    if stagnation_counter >= args.patience:
-                        print(f"\n[STOP] Early Stopping déclenché (Patience {args.patience} atteinte).")
-                        wandb.log(metrics) # Log final avant de quitter
-                        break
-
-            else:
-                print(f"    [WARNING] Val pr_auc invalide ({pr_auc}). Ignoré.")
-
-        # D. Backup Périodique
-        if epoch % 5 == 0:
-            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"backup_ep{epoch}.pt"))
-
-        # E. Envoi des métriques à WandB
-        wandb.log(metrics)
-
-    # 9. Fin du script
-    total_duration_hours = (time.time() - total_start_time) / 3600
-    wandb.run.summary["total_train_time_hours"] = total_duration_hours
-
-    # Versionning du modèle final
-    print(f"\n[WANDB] Upload du modèle final ({exp_name}) en cours...")
-
-    # On cherche le bon modèle avec l'exp_name
-    search_pattern = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt")
-    final_model_files = glob.glob(search_pattern)
-
-    if final_model_files:
-        model_path = final_model_files[0] 
-        nom_fichier = os.path.basename(model_path)
-        print(f"[WANDB] Fichier trouvé sur le cluster : {nom_fichier}")
-
-        # 1. On copie le modèle DANS le dossier interne du run W&B
-        wandb_internal_path = os.path.join(wandb.run.dir, nom_fichier)
-        shutil.copy2(model_path, wandb_internal_path)
-
-        # 2. Création et upload de l'artefact à partir de cette copie interne
-        artifact_name = f"model-{model_name}-{wandb.run.id}"
-        artifact = wandb.Artifact(artifact_name, type='model')
-
-        # On ajoute le fichier interne, avec son nom propre
-        artifact.add_file(wandb_internal_path, name=nom_fichier)
-        wandb.log_artifact(artifact)
-
-        print("[WANDB] Upload préparé avec succès pour la synchro locale.")
-    else:
-        print(f"[WANDB] ERREUR : Aucun modèle trouvé pour le pattern {search_pattern}")
-
+    # Clôture du run W&B
     wandb.finish()
-    print(f"[FIN] Terminé en {total_duration_hours:.2f} heures. Best PR-AUC: {best_val_pr_auc}")
 
 
 
@@ -642,7 +750,7 @@ def main():
     # Hyperparamètres
     parser.add_argument('--epochs', type=int, default=80, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
-    parser.add_argument('--backbone_lr', type=float, default=1e-6, help="Learning Rate initial for the backbone")
+    parser.add_argument('--backbone_lr', type=float, default=1e-4, help="Learning Rate initial for the backbone")
     parser.add_argument('--weight_decay', type=float, default=1e-4, help="pénaliter pour la régularisation du model")
     parser.add_argument('--patience', type=int, default=10, help="Nb époques sans amélioration avant arrêt")
     parser.add_argument('--val_start_epoch', type=int, default=15, help="epoch ou commencer la validation")
