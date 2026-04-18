@@ -385,7 +385,9 @@ def run(args):
     dataset_kwargs = {
         "batch_size": args.batch_size_accumulat,
         "mega_batch_size": mb_size,
-        "use_static_padding": args.use_static_padding
+        "use_static_padding": args.use_static_padding,
+        "h": args.input_h, 
+        "w": args.input_w 
     }
 
     if gen_fun is not None:
@@ -660,6 +662,8 @@ def main():
     )
 
     # Argument for Cnn Image
+    parser.add_argument('--input_h', type=int, default=512)
+    parser.add_argument('--input_w', type=int, default=512)
     parser.add_argument('--cnn_mode', type=str, default='square', choices=['square', 'rectangle'],
                         help="Mode for CNN_Image: 'square' (3x3) or 'rectangle' (half-height)")
 

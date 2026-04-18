@@ -40,32 +40,21 @@ class CNN_Image(nn.Module):
         )
 
     def forward(self, x, batch_mask=None):
-        """ x.shape: (Batch, 12, H, W) """
+        # x shape: [B, S, C, H, W]
+        b, s, c, h, w = x.shape
+        x = x.reshape(-1, c, h, w)
 
         if x.dtype == torch.uint8:
-            x = x.to(next(self.parameters()).dtype) / 255.0
+            x = x.to(device=x.device, dtype=torch.float32).div_(255.0)
         
-        # Square or Rectangle
         x = F.relu(self.bn1(self.conv1(x)))
-        
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
-        
         x = self.global_pool(x)
         x = torch.flatten(x, 1)
-        logits = self.fc(x)
-        
-        return logits # (Batch, num_classes)
+        logits = self.fc(x) # [B*S, 27]
+        logits = logits.view(b, s, -1) # [B, S, 27]
 
-
-if __name__ == "__main__":
-    # Test Square Mode
-    model_sq = CNN_Image(mode='square')
-    dummy_input = torch.randn(2, 12, 512, 512)
-    out_sq = model_sq(dummy_input)
-    print(f"Square output shape: {out_sq.shape}") # [2, 27]
-
-    # Test Rectangle Mode
-    model_rect = CNN_Image(mode='rectangle')
-    out_rect = model_rect(dummy_input)
-    print(f"Rectangle output shape: {out_rect.shape}") # [2, 27]
+        logits = logits.mean(1)
+            
+        return logits # [B, 27]
