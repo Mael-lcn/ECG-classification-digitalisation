@@ -1,6 +1,4 @@
-import os
-import sys
-import glob
+import os, time
 import shutil
 import argparse
 from pathlib import Path
@@ -14,26 +12,28 @@ from torch.utils.data import DataLoader
 
 import wandb
 
-project_root = os.path.join(os.path.dirname(__file__), '../..')
-sys.path.append(os.path.abspath(project_root))
-
+# Importation des briques modulaires
 from model_factory import get_shared_parser, build_model
-
-# On importe les bases solides qu'on a créées dans core_utils.py
-from core_utils import setup_global_environment, setup_wandb, load_pos_weight
-from train import run_fold, generate_exp_name  # On réutilise la logique de boucle de train.py
+from core_utils import (
+    setup_global_environment, 
+    setup_wandb, 
+    load_pos_weight, 
+    NEED_COMPILE
+)
+# On importe la boucle d'entraînement du script de base
+from train import run_training_loop, generate_exp_name 
 
 
 
 def create_symlink_fold(fold_dir, train_files, val_files):
     """
-    Génère une structure de répertoires temporaire pour l'itération de validation croisée
-    et crée des liens symboliques vers les fichiers de données originaux. 
+    Génère une structure de répertoires temporaire pour l'itération de validation croisée et crée des liens symboliques
+    vers les fichiers de données originaux.
 
     Args:
         fold_dir (str): Le chemin du répertoire temporaire racine dédié au pli actuel.
-        train_files (list ou numpy.ndarray): Les chemins absolus des fichiers alloués à l'ensemble d'entraînement.
-        val_files (list ou numpy.ndarray): Les chemins absolus des fichiers alloués à l'ensemble de validation.
+        train_files (list or numpy.ndarray): Les chemins absolus des fichiers alloués à l'ensemble d'entraînement.
+        val_files (list or numpy.ndarray): Les chemins absolus des fichiers alloués à l'ensemble de validation.
 
     Returns:
         tuple: Un tuple contenant les chemins absolus des deux sous-répertoires créés :
@@ -43,143 +43,142 @@ def create_symlink_fold(fold_dir, train_files, val_files):
     train_dir = os.path.join(fold_dir, "train")
     val_dir = os.path.join(fold_dir, "val")
 
-    # Nettoyage si le dossier existe déjà
     if os.path.exists(fold_dir):
         shutil.rmtree(fold_dir)
 
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(val_dir, exist_ok=True)
 
-    # Création des liens (symlinks) pour le Train
     for f in train_files:
-        filename = os.path.basename(f)
-        os.symlink(f, os.path.join(train_dir, filename))
-
-    # Création des liens (symlinks) pour le Val
+        os.symlink(f, os.path.join(train_dir, os.path.basename(f)))
     for f in val_files:
-        filename = os.path.basename(f)
-        os.symlink(f, os.path.join(val_dir, filename))
+        os.symlink(f, os.path.join(val_dir, os.path.basename(f)))
 
     return train_dir, val_dir
 
 
 def run_kfold_pipeline(args):
     """
-    Orchestre le pipeline complet d'entraînement basé sur une validation croisée à K plis.
-    La fonction effectue la recherche récursive des fichiers de données,
-    configure l'environnement d'exécution matériel, et procède à la division stochastique des données.
-    Pour chaque itération (pli), elle réinitialise de manière stricte le modèle,
-    l'optimiseur et les chargeurs de données, puis lance la boucle d'apprentissage.
-    Elle intègre également le suivi des métriques via Weights & Biases de façon cloisonnée pour chaque pli et gère
-    le nettoyage des données temporaires en fin d'exécution.
+    Orchestre le pipeline complet de validation croisée à K plis avec une isolation stricte des sorties par dossier.
+
+    Réalise la collecte récursive des données, définit un groupe d'expérience unique et itère sur les plis de validation. 
+    Pour chaque pli, un sous-répertoire de sauvegarde dédié est créé et la boucle d'entraînement 
+    est exécutée de manière cloisonnée. Le processus gère également la redirection dynamique des chemins 
+    de sauvegarde et calcule le temps total d'exécution de l'expérience à l'issue du processus.
 
     Args:
-        args (argparse.Namespace): Les arguments de configuration contenant les hyperparamètres d'entraînement, les chemins des données et les paramètres de la validation croisée.
+        args (argparse.Namespace): Les arguments de configuration contenant les hyperparamètres d'entraînement,
+                                    les chemins des données et les paramètres de la validation croisée.
 
     Raises:
-        ValueError: Si aucun fichier de données correspondant à l'extension ciblée n'est trouvé dans les répertoires spécifiés.
+        ValueError: Si aucun fichier de données correspondant au motif de recherche n'est trouvé dans les répertoires spécifiés.
     """
-    # 1. Collecte de toutes les données
-    print("[K-FOLD] Collecte des données depuis :", args.data_dirs)
-    all_files = np.array([str(p.resolve()) for p in Path(args.data_source).rglob('*signal.npy') if p.is_file()])
-
+    # 1. Collecte des fichiers
+    print(f"[K-FOLD] Recherche dans : {args.data_dirs}")
+    all_files = np.array([str(p.resolve()) for p in Path(args.data_dirs).rglob('*signal.npy') if p.is_file()])
     if len(all_files) == 0:
-        raise ValueError("Aucun fichier trouvé dans les dossiers spécifiés.")
-    print(f"[K-FOLD] Total de fichiers trouvés : {len(all_files)}")
+        raise ValueError(f"Aucun fichier trouvé dans {args.data_dirs}")
 
-    # 2. Configuration système globale
+    # 2. Setup global
     device, use_amp, amp_dtype = setup_global_environment(args)
 
-    # Génération d'un nom de groupe WandB unique pour relier tous les folds de cette expérience
-    group_name = f"kfold_{args.model_name}_{wandb.util.generate_id()[:6]}"
+    # Nom unique pour le groupe d'expérience
+    group_id = wandb.util.generate_id()[:6]
+    group_name = f"kfold_{args.model_name}_{group_id}"
 
-    # Dossier parent temporaire pour héberger les sous-dossiers des symlinks
-    base_tmp_kfold = os.path.join(args.output, "tmp_kfold_data")
+    # Création du dossier racine de l'expérience dans les checkpoints
+    kfold_checkpoint_root = os.path.join(args.checkpoint_dir, group_name)
+    os.makedirs(kfold_checkpoint_root, exist_ok=True)
 
-    # 3. Préparation du Splitter
+    # Dossier pour les données temporaires
+    base_tmp_data = os.path.join(args.output, f"tmp_kfold_{group_id}")
+
     kf = KFold(n_splits=args.k, shuffle=True, random_state=42)
 
-    # 4. Boucle sur les Folds
+    total_exp_start = time.time()
+
     for fold, (train_idx, val_idx) in enumerate(kf.split(all_files)):
-        print(f"\n{'='*50}\nLANCEMENT DU FOLD {fold}/{args.k - 1}\n{'='*50}")
+        print(f"\n{'='*60}\nDÉMARRAGE FOLD {fold}/{args.k - 1}\n{'='*60}")
 
-        train_files = all_files[train_idx]
-        val_files = all_files[val_idx]
-        print(f"[FOLD {fold}] Train: {len(train_files)} fichiers | Val: {len(val_files)} fichiers")
+        # Dossier spécifique pour les checkpoints de ce fold
+        fold_ckpt_dir = os.path.join(kfold_checkpoint_root, f"fold_{fold}")
+        os.makedirs(fold_ckpt_dir, exist_ok=True)
 
-        # Création des dossiers symlinks à la volée
-        fold_dir = os.path.join(base_tmp_kfold, f"fold_{fold}")
-        train_path, val_path = create_symlink_fold(fold_dir, train_files, val_files)
+        # Dossier spécifique pour les données de ce fold
+        fold_data_dir = os.path.join(base_tmp_data, f"fold_{fold}")
+        train_path, val_path = create_symlink_fold(fold_data_dir, all_files[train_idx], all_files[val_idx])
 
-        # Setup WandB spécifique à ce fold
-        wandb_id = setup_wandb(args, job_type=f"train_fold{fold}", run_name=f"run_f{fold}_{args.model_name}", group=group_name)
+        # Setup WandB
+        wandb_id = setup_wandb(args, job_type=f"fold_{fold}", run_name=f"f{fold}_{group_id}", group=group_name)
 
-        # RAZ model et optimzer
+        # Build Model
         model, valid_kwargs, Dataset_fun, gen_fun = build_model(args)
         model = model.to(device)
-        
-        param_groups = [
-            {"params": [p for n, p in model.named_parameters() if p.requires_grad and "backbone" in n], "lr": args.backbone_lr},
-            {"params": [p for n, p in model.named_parameters() if p.requires_grad and "backbone" not in n], "lr": args.lr}
-        ]
 
+        if args.model_name in NEED_COMPILE or args.use_static_padding:
+            try: model = torch.compile(model)
+            except Exception as e: print(f"[WARN] Torch compile failed: {e}")
+
+        # Optim & Loss
+        param_groups = [
+            {"params": [p for n, p in model.named_parameters() if "backbone" in n], "lr": args.backbone_lr},
+            {"params": [p for n, p in model.named_parameters() if "backbone" not in n], "lr": args.lr}
+        ]
         optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay, fused=True)
-        pos_weight_tensor = load_pos_weight(args.pos_weight_path, args.num_classes, device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=load_pos_weight(args.pos_weight_path, args.num_classes, device))
         scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
+        # DataLoaders
         dataset_kwargs = {
             "batch_size": args.batch_size_accumulat,
             "mega_batch_size": args.batch_size_theoric * args.mega_batch_factor,
             "use_static_padding": args.use_static_padding
         }
-        if gen_fun is not None:
-            dataset_kwargs["generate_img"] = gen_fun
+        if gen_fun: dataset_kwargs["generate_img"] = gen_fun
 
-        train_ds = Dataset_fun(data_path=train_path, **dataset_kwargs)
-        val_ds = Dataset_fun(data_path=val_path, **dataset_kwargs)
+        train_loader = DataLoader(Dataset_fun(train_path, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
+        val_loader = DataLoader(Dataset_fun(val_path, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
 
-        train_loader = DataLoader(train_ds, batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
-        val_loader = DataLoader(val_ds, batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
+        # On sauvegarde le chemin original pour le restaurer après
+        original_ckpt_dir = args.checkpoint_dir
+        args.checkpoint_dir = fold_ckpt_dir # On injecte le dossier du fold
 
-        exp_name = generate_exp_name(args, wandb_id)
-
-        # Lancement du train pour ce fold
-        run_fold(
+        # Lancement
+        run_training_loop(
             args=args, model=model, train_loader=train_loader, val_loader=val_loader,
             optimizer=optimizer, criterion=criterion, scaler=scaler, device=device,
-            use_amp=use_amp, amp_dtype=amp_dtype, exp_name=exp_name,
-            start_epoch=1, best_score=-1.0, fold=fold
+            use_amp=use_amp, amp_dtype=amp_dtype, 
+            exp_name=generate_exp_name(args, valid_kwargs, wandb_id),
+            start_epoch=1, best_val_pr_auc=-1.0, fold=fold
         )
 
+        # Restauration et Nettoyage
+        args.checkpoint_dir = original_ckpt_dir
         wandb.finish()
-        shutil.rmtree(fold_dir)
+        shutil.rmtree(fold_data_dir)
 
-    print(f"\n[K-FOLD] Expérience terminée. Nettoyage global.")
-    if os.path.exists(base_tmp_kfold):
-        shutil.rmtree(base_tmp_kfold)
+    # Temps total de l'expérience
+    total_time = (time.time() - total_exp_start) / 3600
+    print(f"\n[K-FOLD FINISHED] Temps total pour les {args.k} folds : {total_time:.2f} heures.")
+    
+    if os.path.exists(base_tmp_data):
+        shutil.rmtree(base_tmp_data)
 
 
 def main():
     shared_parser = get_shared_parser()
-    parser = argparse.ArgumentParser(description="Script K-Fold d'entraînement", parents=[shared_parser])
-
-    # Nouveaux arguments spécifiques au K-Fold
-    parser.add_argument('-k', type=int, default=5, help="Nombre de splits (folds) pour la cross-validation")
-    parser.add_argument('--data_dirs', type=str,default="../../../output/final_data/",
-                        help="Liste des dossiers contenant les données brutes à regrouper avant le split K-Fold")
-
-    # Hyperparamètres
+    parser = argparse.ArgumentParser(description="K-Fold Training", parents=[shared_parser])
+    parser.add_argument('-k', type=int, default=5)
+    parser.add_argument('--data_dirs', type=str, default="../../../output/final_data/")
+    parser.add_argument('--pos_weight_path', type=str, default="../ressources/pos_weight.pt")
     parser.add_argument('--epochs', type=int, default=80)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--backbone_lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--val_start_epoch', type=int, default=15)
-
-    parser.add_argument('--pos_weight_path', type=str, default="../ressources/pos_weight.pt")
+    
     args = parser.parse_args()
-
     run_kfold_pipeline(args)
 
 if __name__ == "__main__":

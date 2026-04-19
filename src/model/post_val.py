@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 import json
 import argparse
@@ -18,10 +17,13 @@ sys.path.append(os.path.abspath(project_root))
 
 from evaluation import compute_challenge_metric, load_weights
 from model_factory import get_shared_parser, build_model
+from core_utils import (
+    setup_global_environment,
+    setup_wandb,
+    run_inference,
+    load_checkpoint
+)
 
-
-
-torch.set_float32_matmul_precision('high')
 
 # variables globales pour le multiprocessing
 _worker_probs = None
@@ -32,9 +34,7 @@ _worker_sr = None
 
 
 def _init_worker(probs, labels, weights, classes, sr):
-    """
-    initialise la mémoire partagée pour chaque processus travailleur.
-    """
+    """Initialise la mémoire partagée pour chaque processus travailleur."""
     global _worker_probs, _worker_labels, _worker_weights, _worker_classes, _worker_sr
     _worker_probs = probs
     _worker_labels = labels
@@ -43,29 +43,26 @@ def _init_worker(probs, labels, weights, classes, sr):
     _worker_sr = sr
 
 
-def get_predictions(model, dataloader, device, use_amp, amp_dtype):
-    """
-    effectue l'inférence sur le jeu de validation
-    """
-    all_labels, all_probs = [], []
-    model.eval()
-    with torch.no_grad():
-        for x, y, batch_mask in tqdm(dataloader, desc="inférence"):
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            batch_mask = batch_mask.to(device, non_blocking=True)
-
-            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
-                probs = torch.sigmoid(model(x, batch_mask=batch_mask))
-
-            all_labels.append(y.cpu())
-            all_probs.append(probs.cpu())
-
-    return torch.cat(all_labels).to(torch.float32).numpy().astype(bool), torch.cat(all_probs).to(torch.float32).numpy()
-
 def validate_bootstrapping(labels, probs, weights, classes, nsr_index, thresholds, n_iterations=100):
     """
-    Évalue la robustesse statistique via Bootstrapping pour obtenir des intervalles de confiance à 95%.
+    Évalue la robustesse statistique des métriques d'évaluation via la méthode de bootstrapping. 
+    
+    Calcule les intervalles de confiance à 95 % pour le score du challenge, le F1-score macro et la perte de Hamming,
+    en effectuant des tirages aléatoires avec remise sur les données de validation.
+
+    Args:
+        labels (numpy.ndarray): Matrice des étiquettes réelles.
+        probs (numpy.ndarray): Matrice des probabilités prédites.
+        weights (numpy.ndarray): Matrice des pondérations pour le score du challenge.
+        classes (list): Liste des désignations des classes.
+        nsr_index (int): Index de la classe correspondant au rythme sinusal normal.
+        thresholds (numpy.ndarray): Vecteur des seuils de décision optimisés par classe.
+        n_iterations (int): Nombre d'itérations pour le tirage de bootstrapping.
+
+    Returns:
+        tuple: Un tuple contenant :
+            - results (dict): Les métriques statistiques agrégées (moyenne et intervalles de confiance pour chaque métrique).
+            - stats (dict): Les listes des scores bruts calculés pour chaque itération de la boucle.
     """
     n_samples = len(labels)
     nsr_name = classes[nsr_index]
@@ -97,7 +94,25 @@ def validate_bootstrapping(labels, probs, weights, classes, nsr_index, threshold
 
     return results, stats
 
+
 def compute_binary_metrics(labels, probs, thresholds, nsr_index):
+    """
+    Calcule les métriques de classification binaire pour la sous-tâche distinguant les patients sains des patients malades.
+    
+    Un patient est considéré comme malade s'il présente au moins une pathologie autre que le rythme sinusal normal (NSR).
+
+    Args:
+        labels (numpy.ndarray): Matrice binaire des étiquettes réelles.
+        probs (numpy.ndarray): Matrice des probabilités prédites.
+        thresholds (numpy.ndarray): Tableau des seuils de décision par classe.
+        nsr_index (int): Index de la classe représentant l'état sain.
+
+    Returns:
+        tuple: Un tuple contenant :
+            - metrics (dict): Dictionnaire comprenant la sensibilité, spécificité, F1-score, coefficient de corrélation de Matthews (MCC) et la prévalence de la maladie.
+            - real_sick (numpy.ndarray): Vecteur booléen indiquant la présence réelle d'une pathologie.
+            - pred_sick (numpy.ndarray): Vecteur booléen indiquant la prédiction d'une pathologie par le modèle.
+    """
     num_classes = labels.shape[1]
     other_indices = [i for i in range(num_classes) if i != nsr_index]
 
@@ -125,6 +140,20 @@ def compute_binary_metrics(labels, probs, thresholds, nsr_index):
 
 
 def _val_batch(args):
+    """
+    Évalue les performances d'une configuration de seuils spécifique sur un sous-ensemble de données. 
+    
+    Fonction conçue pour être exécutée en parallèle par les processus travailleurs lors de la recherche par quadrillage.
+
+    Args:
+        args (tuple): Un tuple contenant :
+            - th (float): Le seuil testé pour la classe cible.
+            - class_idx (int): L'index de la classe en cours d'optimisation.
+            - base_thresholds (numpy.ndarray): Le vecteur des seuils de base pour les autres classes.
+
+    Returns:
+        tuple: Un tuple contenant le score du challenge, le F1-score macro, le score MCC, et la valeur du seuil testé (th).
+    """
     th, class_idx, base_thresholds = args
     test_thresholds = base_thresholds.copy()
     test_thresholds[class_idx] = th
@@ -137,7 +166,25 @@ def _val_batch(args):
 
     return challenge, f1, mcc, th
 
+
 def optimize_all_metrics(val_labels, val_probs, weights, classes, nsr_index, num_workers, epochs=3):
+    """
+    Effectue une recherche multivariée itérative pour déterminer les vecteurs de seuils optimisant de manière indépendante plusieurs métriques cibles.
+    
+    Utilise le multiprocessing pour accélérer l'exploration de l'espace des paramètres. À chaque époque, la fonction itère sur chaque classe pour affiner le seuil de décision tout en maintenant les autres fixes.
+
+    Args:
+        val_labels (numpy.ndarray): Matrice des étiquettes réelles de l'ensemble de validation.
+        val_probs (numpy.ndarray): Matrice des probabilités issues de l'inférence du modèle.
+        weights (numpy.ndarray): Matrice des poids pour le calcul de la métrique du challenge.
+        classes (list): Liste des noms des pathologies.
+        nsr_index (int): Index associé au rythme sinusal normal.
+        num_workers (int): Nombre de processus parallèles à allouer pour l'évaluation.
+        epochs (int): Nombre de passages complets d'optimisation sur l'ensemble des classes.
+
+    Returns:
+        dict: Un dictionnaire associant chaque métrique cible (score du challenge, F1-score macro, MCC) à son meilleur score obtenu et à son vecteur de seuils optimal.
+    """
     nsr_name = classes[nsr_index]
     best_thresholds = np.ones(len(classes)) * 0.5
     candidate_thresholds = np.arange(0.05, 0.41, 0.01)
@@ -180,32 +227,19 @@ def optimize_all_metrics(val_labels, val_probs, weights, classes, nsr_index, num
 
 
 def run(args):
+    """
+    Orchestre le processus global de post-validation et d'optimisation des seuils de décision.
+
+    Configure l'environnement, charge le modèle depuis un point de sauvegarde (checkpoint), exécute l'inférence sur le jeu de validation, et lance la recherche multivariée. 
+    Évalue ensuite la robustesse des résultats via bootstrapping, extrait les performances de la sous-tâche binaire, génère des graphiques d'analyse, exporte les configurations optimales au format JSON et synchronise l'ensemble des artefacts avec Weights & Biases.
+
+    Args:
+        args (argparse.Namespace): Arguments contenant la configuration système, les hyperparamètres et les chemins d'accès aux fichiers.
+    """
     mp.set_start_method("spawn", force=True)
     torch.set_num_threads(args.workers)
 
-    checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
-
-    # Configuration matérielle et amp
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        device = torch.device(f"cuda:{args.gpu}")
-        use_amp = not args.not_use_amp
-
-        if use_amp and torch.cuda.is_bf16_supported():
-            amp_dtype = torch.bfloat16
-            print("[init] matériel compatible ampere détecté : bfloat16 activé.")
-        else:
-            amp_dtype = torch.float16
-            print("[init] bfloat16 non supporté : fallback sur float16.")
-
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-        torch.backends.cuda.enable_math_sdp(True)
-    else:
-        device = torch.device("cpu")
-        use_amp = False
-        amp_dtype = torch.float32
-        print("[init] mode cpu forcé.")
+    device, use_amp, amp_dtype = setup_global_environment(args)
 
     with open(args.class_map) as f:
         classes = json.load(f)
@@ -213,25 +247,18 @@ def run(args):
     assert weight_classes == classes
     nsr_index = classes.index("NSR")
 
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    os.environ["WANDB_MODE"] = "offline" 
-    os.environ["WANDB_DIR"] = os.path.join(args.output, "wandb_logs")
-    os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
-
-    wandb_id = wandb.util.generate_id()
-    wandb.init(
-        project="ecg_classification_experiments",
+    wandb_id = setup_wandb(
+        args=args,
         job_type="post_val",
-        name=f"validation_{args.model_name}_{wandb_id[:6]}",
-        config=vars(args),
-        id=wandb_id,
-        tags=["validation", args.model_name, "offline"]
+        run_name=f"validation_{args.model_name}_{wandb.util.generate_id()[:6]}",
+        tags=["validation", args.model_name]
     )
 
     model, _, Dataset_fun, gen_fun = build_model(args)
     model = model.to(device)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()})
+
+    checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
+    load_checkpoint(checkpoint_path, model, device=device)
 
     mb_size = args.batch_size_theoric * args.mega_batch_factor
     dataset_kwargs = {
@@ -243,51 +270,47 @@ def run(args):
     if gen_fun is not None:
         dataset_kwargs["generate_img"] = gen_fun
 
-    val_ds = Dataset_fun(
-        data_path=args.data,
-        **dataset_kwargs
-    )
+    val_ds = Dataset_fun(data_path=args.data, **dataset_kwargs)
 
     val_loader = DataLoader(
-        val_ds,
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=(args.workers > 0),
-        prefetch_factor=2
+        val_ds, batch_size=None, num_workers=args.workers,
+        pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2
     )
 
-    # 1. inférence avec amp
-    labels, probs = get_predictions(model, val_loader, device, use_amp, amp_dtype)
-    
-    # 2. Remplacement par Sklearn (beaucoup plus rapide et safe)
+    labels, probs, is_valid = run_inference(
+        model, val_loader, device, use_amp, amp_dtype, desc="[Inférence Val]"
+    )
+
+    if not is_valid:
+        print("[WARNING] Valeurs invalides (NaNs) détectées lors de l'inférence. L'optimisation risque d'échouer.")
+
     try:
         auroc_macro = roc_auc_score(labels, probs, average='macro')
         auprc_macro = average_precision_score(labels, probs, average='macro')
     except ValueError:
         auroc_macro, auprc_macro = float('nan'), float('nan')
+
     wandb.log({"validation_brute/auroc_macro": auroc_macro, "validation_brute/auprc_macro": auprc_macro})
 
-    # 3. Optimisation ciblée des seuils
+    # Optimisation ciblée des seuils
     best_configs = optimize_all_metrics(labels, probs, weights, classes, nsr_index, epochs=3, num_workers=args.workers)
 
-    # 4. Bootstrapping avec les seuils optimaux (vrais intervalles de confiance)
+    # Bootstrapping avec les seuils optimaux
     best_challenge_th = best_configs["challenge_score"]["thresholds"]
     robustness_metrics, raw_bootstrap_stats = validate_bootstrapping(labels, probs, weights, classes, nsr_index, best_challenge_th)
     wandb.log(robustness_metrics)
 
-    # 5. Extraction binaire avec le meilleur modèle pour le challenge
+    # Extraction binaire
     binary_results, real_sick, pred_sick = compute_binary_metrics(labels, probs, best_challenge_th, nsr_index)
     wandb.log(binary_results)
 
-    
     # A. Histograms du Bootstrapping
     wandb.log({
         "distribution_bootstrap/challenge": wandb.Histogram(raw_bootstrap_stats['challenge']),
         "distribution_bootstrap/macro_f1": wandb.Histogram(raw_bootstrap_stats['macro_f1'])
     })
 
-    # B. F1-Score par Classe (Bar Chart interactif sur Wandb)
+    # B. F1-Score par Classe
     best_preds_f1 = (probs >= best_configs["macro_f1"]["thresholds"]).astype(bool)
     f1_per_class = f1_score(labels, best_preds_f1, average=None, zero_division=0)
     f1_table = wandb.Table(
@@ -305,7 +328,7 @@ def run(args):
         )
     })
 
-    # préparation du fichier json
+    # D. Préparation et Log du fichier JSON
     final_config = {
         "metadata": {
             "model_name": args.model_name,
@@ -340,10 +363,7 @@ def main():
     args = parser.parse_args()
 
     args.workers = max(4, mp.cpu_count()-1)
-
     run(args)
 
-
 if __name__ == "__main__":
-    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     main()

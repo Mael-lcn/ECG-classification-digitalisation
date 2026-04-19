@@ -5,6 +5,8 @@ from tqdm import tqdm
 
 
 
+NEED_COMPILE = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
+
 
 def setup_global_environment(args):
     """
@@ -27,6 +29,8 @@ def setup_global_environment(args):
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     os.makedirs(args.output, exist_ok=True)
+
+    torch.set_float32_matmul_precision('high')
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

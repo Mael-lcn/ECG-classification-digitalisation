@@ -23,7 +23,8 @@ from core_utils import (
     setup_wandb, 
     run_inference, 
     load_pos_weight, 
-    load_checkpoint
+    load_checkpoint,
+    NEED_COMPILE
 )
 
 import warnings
@@ -31,9 +32,6 @@ import warnings
 
 
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
-
-NEED_COMPILE = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
-
 
 
 def generate_exp_name(args, valid_kwargs, wandb_id):
@@ -143,7 +141,8 @@ def run_training_loop(
     amp_dtype,
     exp_name,
     start_epoch,
-    best_val_pr_auc
+    best_val_pr_auc,
+    fold=-1
 ):
     """
     Orchestre le processus global d'entraînement sur plusieurs époques, incluant l'évaluation périodique, la sauvegarde des meilleurs modèles (checkpoints) et l'arrêt prématuré (early stopping) en cas de stagnation.
@@ -162,18 +161,21 @@ def run_training_loop(
         exp_name (str): Le nom de l'expérience utilisé pour formater les fichiers de sauvegarde.
         start_epoch (int): L'époque de départ (utile pour la reprise de l'entraînement).
         best_val_pr_auc (float): Le meilleur score PR-AUC précédemment atteint pour initialiser la sauvegarde de modèle.
+        fold (int): L'index du fold actuel (utile pour le K-Fold, vaut -1 par défaut).
     """
-    wandb.define_metric("val/pr_auc", step_metric="epoch")
-    wandb.define_metric("train/loss", step_metric="epoch")
+    prefix = f"fold_{fold}/" if fold != -1 else ""
+
+    wandb.define_metric(f"{prefix}val/pr_auc", step_metric=f"{prefix}epoch")
+    wandb.define_metric(f"{prefix}train/loss", step_metric=f"{prefix}epoch")
 
     print(f"\n[TRAIN] Démarrage : Epoch {start_epoch} -> {args.epochs}")
     stagnation_counter = 0
     best_model_path = None
     accum_steps = max(1, args.batch_size_theoric // args.batch_size_accumulat)
 
-    for epoch in range(start_epoch, args.epochs + 1):
-        epoch_start = time.time()
+    total_start_time = time.time()
 
+    for epoch in range(start_epoch, args.epochs + 1):
         # 1. Phase d'entraînement
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, 
@@ -181,9 +183,9 @@ def run_training_loop(
         )
 
         metrics = {
-            "epoch": epoch,
-            "train/loss": train_loss,
-            "train/lr": optimizer.param_groups[0]['lr'], 
+            f"{prefix}epoch": epoch,
+            f"{prefix}train/loss": train_loss,
+            f"{prefix}train/lr": optimizer.param_groups[0]['lr'], 
         }
 
         # 2. Phase de Validation (via le moteur universel core_utils)
@@ -231,19 +233,28 @@ def run_training_loop(
                 'optimizer_state_dict': optimizer.state_dict(), 'best_val_pr_auc': best_val_pr_auc
             }
             if scaler: checkpoint['scaler_state_dict'] = scaler.state_dict()
-            torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"backup_ep{epoch}.pt"))
+            torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"backup_{exp_name}_ep{epoch}.pt"))
 
         wandb.log(metrics)
+    
+    total_train_time_hours = (time.time() - total_start_time) / 3600.0
+    wandb.run.summary["total_train_time_hours"] = total_train_time_hours
 
     # 4. Upload du modèle final sur WandB
     if best_model_path and os.path.exists(best_model_path):
         print(f"\n[WANDB] Upload du modèle final ({os.path.basename(best_model_path)})...")
         shutil.copy2(best_model_path, os.path.join(wandb.run.dir, os.path.basename(best_model_path)))
-        artifact = wandb.Artifact(f"model-{args.model_name}-{wandb.run.id}", type='model')
+
+        # On ajoute le numéro de fold au nom de l'artefact pour éviter les écrasements
+        artifact_name = f"model-{args.model_name}-{wandb.run.id}"
+        if fold != -1:
+            artifact_name += f"-fold{fold}"
+
+        artifact = wandb.Artifact(artifact_name, type='model')
         artifact.add_file(os.path.join(wandb.run.dir, os.path.basename(best_model_path)))
         wandb.log_artifact(artifact)
 
-    print(f"\n[FIN] Entraînement terminé. Meilleur PR-AUC : {best_val_pr_auc:.4f}")
+    print(f"\n[FIN] Entraînement terminé en {total_train_time_hours:.2f} heures. Meilleur PR-AUC : {best_val_pr_auc:.4f}")
 
 
 def run(args):
@@ -304,7 +315,7 @@ def run(args):
     scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
     # 6. Reprise
-    start_epoch, best_score = load_checkpoint(args.resume_from if args.resume_from else "", model, optimizer, scaler, device)
+    start_epoch, best_score = load_checkpoint(args.resume_from if args.resume_from else "", model, device, optimizer, scaler)
     if not args.resume_from and wandb.run.summary.get("best_val_pr_auc"):
         best_score = float(wandb.run.summary["best_val_pr_auc"])
 
