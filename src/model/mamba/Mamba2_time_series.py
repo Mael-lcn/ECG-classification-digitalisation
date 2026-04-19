@@ -7,7 +7,7 @@ class Mamba2_time_series(nn.Module):
     def __init__(
         self, 
         M2_in_channels=12,      # 12 dérivations de l'ECG
-        num_classes=27,         # Tes 27 classes de pathologies
+        num_classes=27,
         M2_hidden_dim=1024,      # Dimension de la couche cachée du classifieur
         M2_dropout_classifier=0.4
     ):
@@ -16,7 +16,7 @@ class Mamba2_time_series(nn.Module):
         # Dimension interne envoyée à Mamba (doit être un multiple de headdim)
         mamba_dim = 768
 
-        # --- 1. PROJECTION D'ENTRÉE (Convolutions temporelles) ---
+        # 1. Projection d'entrée
         # Prend [Batch, 12, Longueur] et sort [Batch, 768, Longueur/4]
         self.input_proj = nn.Sequential(
             nn.Conv1d(M2_in_channels, mamba_dim // 4, kernel_size=5, stride=2, padding=2),
@@ -32,7 +32,7 @@ class Mamba2_time_series(nn.Module):
             nn.BatchNorm1d(mamba_dim)
         )
 
-        # --- 2. BACKBONE MAMBA 2 ---
+        #  2. Backbone Mamba 2
         # Configuration stricte pour activer les noyaux CUDA ultra-rapides
         self.backbone = Mamba2(
             d_model=mamba_dim, # 768
@@ -42,7 +42,7 @@ class Mamba2_time_series(nn.Module):
             headdim=128,
         )
 
-        # --- 3. TÊTE DE CLASSIFICATION ---
+        #  3. MLP classif
         self.classifier = nn.Sequential(
             nn.Linear(mamba_dim, M2_hidden_dim),
             nn.BatchNorm1d(M2_hidden_dim),

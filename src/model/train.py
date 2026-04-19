@@ -227,7 +227,7 @@ def run_training_loop(
             else:
                 print(f"    [WARNING] NaNs détectés, métrique ignorée pour l'époque {epoch}.")
 
-        # 3. Sauvegarde de sécurité (Backup)
+        # 3. Sauvegarde de sécurité
         if epoch % 5 == 0:
             checkpoint = {
                 'epoch': epoch, 'model_state_dict': model.state_dict(),
@@ -343,7 +343,7 @@ def main():
     parser.add_argument('--train_data', type=str, default="../../../output/final_data/train")
     parser.add_argument('--val_data', type=str, default="../../../output/final_data/val")
 
-    parser.add_argument('--epochs', type=int, default=80)
+    parser.add_argument('--epochs', type=int, default=60)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--backbone_lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)

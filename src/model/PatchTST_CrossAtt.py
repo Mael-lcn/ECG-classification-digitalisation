@@ -84,7 +84,7 @@ class PatchTST_CrossAtt(nn.Module):
             logits = self.classifier(out)
             return logits
 
-        # Cas 2 : Signal long traité par mini-lots de blocs (chunks)
+        # Cas 2 : Signal long traité par mini-lots de blocs
         else:
             num_chunks = math.ceil(T / ctx_len)
             pad_len = (num_chunks * ctx_len) - T

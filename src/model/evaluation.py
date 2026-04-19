@@ -209,7 +209,7 @@ def main():
     base_name = args.checkpoint.split('_ep')[0]
     group_id = base_name.split('-')[-1]
     run_name = f"test_{args.model_name}_{wandb.util.generate_id()[:6]}"
-    
+
     # On ajoute des infos supplémentaires spécifiques à l'eval dans l'objet args pour qu'elles soient logguées
     args.checkpoint_source = args.checkpoint
 

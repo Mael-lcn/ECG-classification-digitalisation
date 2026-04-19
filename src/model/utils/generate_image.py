@@ -28,7 +28,7 @@ distinct_colors = [
 def create_image_12leads_together(tracings, lengths=None, h=512, w=512, segment_size=1000, scale_y=2.8, rgb=True):
     """
     génération d'images ecg où les 12 dérivations sont superposées sur la même figure.
-
+    
     args:
         tracings (torch.tensor): tenseur des signaux de forme (batch, channels, time).
         lengths (torch.tensor, optional): longueurs réelles des signaux pour la gestion du padding.
