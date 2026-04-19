@@ -137,7 +137,7 @@ def run_kfold_pipeline(args):
         if gen_fun: dataset_kwargs["generate_img"] = gen_fun
 
         train_loader = DataLoader(Dataset_fun(train_path, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
-        val_loader = DataLoader(Dataset_fun(val_path, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
+        val_loader = DataLoader(Dataset_fun(val_path, is_train=False, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
 
         # On sauvegarde le chemin original pour le restaurer après
         original_ckpt_dir = args.checkpoint_dir

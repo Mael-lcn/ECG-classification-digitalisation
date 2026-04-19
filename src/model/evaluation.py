@@ -238,7 +238,7 @@ def main():
     }
     if gen_fun is not None: dataset_kwargs["generate_img"] = gen_fun
 
-    test_ds = Dataset_fun(data_path=args.data, **dataset_kwargs)
+    test_ds = Dataset_fun(data_path=args.data, is_train=False,**dataset_kwargs)
     test_loader = DataLoader(
         test_ds, batch_size=None, num_workers=args.workers,
         pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2

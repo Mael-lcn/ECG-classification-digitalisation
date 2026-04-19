@@ -24,6 +24,7 @@ from core_utils import (
     run_inference, 
     load_pos_weight, 
     load_checkpoint,
+    create_attention_mask,
     NEED_COMPILE
 )
 
@@ -97,10 +98,10 @@ def train_one_epoch(
 
     optimizer.zero_grad(set_to_none=True)
 
-    for i, (tracings, targets, batch_mask) in enumerate(loop):
+    for i, (tracings, targets, batch_lens) in enumerate(loop):
         tracings = tracings.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-        batch_mask = batch_mask.to(device, non_blocking=True)
+        batch_mask = create_attention_mask(batch_lens, tracings.shape[2], device)
 
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
             predictions = model(tracings, batch_mask=batch_mask)
@@ -192,7 +193,7 @@ def run_training_loop(
         if epoch >= args.val_start_epoch:
             # On utilise le même moteur d'inférence que l'évaluation et le post_val !
             labels, probs, is_valid = run_inference(model, val_loader, device, use_amp, amp_dtype, desc=f"Ep {epoch} [VAL]")
-            
+
             if is_valid:
                 try:
                     pr_auc = average_precision_score(labels, probs, average='macro')
@@ -214,7 +215,7 @@ def run_training_loop(
                     best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
                     torch.save(model.state_dict(), best_model_path)
                     wandb.run.summary["best_val_pr_auc"] = best_val_pr_auc
-                    
+
                     print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_pr_auc:.4f} (Saved)")
                 else:
                     stagnation_counter += 1
@@ -303,7 +304,7 @@ def run(args):
     )
 
     val_loader = DataLoader(
-        Dataset_fun(args.val_data, **dataset_kwargs),
+        Dataset_fun(args.val_data, is_train=False,  **dataset_kwargs),
         batch_size=None,
         num_workers=args.workers,
         pin_memory=True,

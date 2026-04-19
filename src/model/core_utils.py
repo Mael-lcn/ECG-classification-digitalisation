@@ -102,6 +102,19 @@ def setup_wandb(args, job_type, run_name, group=None, wandb_id=None, resume_mode
     return wandb_id
 
 
+def create_attention_mask(valid_lens, max_len, device):
+    """
+    Fonction universelle pour créer un masque d'attention 2D [batch_size, max_len].
+    Fonctionne pour les ECG 1D (valid_lens = batch_lens, max_len = target_t)
+    ET pour les Images 2D (valid_lens = num_windows, max_len = target_num_images).
+    
+    True = Padding (ignorer), False = Valide (garder).
+    """
+    steps = torch.arange(max_len, device=device).unsqueeze(0)
+    valid_lens = valid_lens.to(device, non_blocking=True).unsqueeze(1)
+
+    return (steps < valid_lens).to(torch.float32)
+
 
 @torch.no_grad()
 def run_inference(model, dataloader, device, use_amp, amp_dtype, desc="[Inférence]", squeeze_batch=False):
@@ -132,11 +145,13 @@ def run_inference(model, dataloader, device, use_amp, amp_dtype, desc="[Inféren
     all_labels, all_probs = [], []
     is_valid = True
 
-    for x, y, batch_mask in tqdm(dataloader, desc=desc, leave=False):
+    for x, y, batch_lens in tqdm(dataloader, desc=desc, leave=False):
         if squeeze_batch and x.shape[0] == 1:
-            x, y, batch_mask = x.squeeze(0), y.squeeze(0), batch_mask.squeeze(0)
+            x, y, batch_lens = x.squeeze(0), y.squeeze(0), batch_lens.squeeze(0)
 
-        x, y, batch_mask = x.to(device, non_blocking=True), y.to(device, non_blocking=True), batch_mask.to(device, non_blocking=True)
+        x = x.to(device, non_blocking=True),
+        y = y.to(device, non_blocking=True),
+        batch_mask = create_attention_mask(batch_lens, x.shape[2], device)
 
         if x.shape[-1] == 0:
             continue # Skip les données invalides
@@ -147,7 +162,7 @@ def run_inference(model, dataloader, device, use_amp, amp_dtype, desc="[Inféren
             if not torch.isfinite(logits).all():
                 is_valid = False
 
-            probs = torch.sigmoid(logits)
+        probs = torch.sigmoid(logits)
 
         all_labels.append(y.cpu())
         all_probs.append(probs.cpu())
