@@ -294,8 +294,21 @@ def run(args):
     }
     if gen_fun: dataset_kwargs["generate_img"] = gen_fun
 
-    train_loader = DataLoader(Dataset_fun(args.train_data, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, prefetch_factor=2)
-    val_loader = DataLoader(Dataset_fun(args.val_data, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, prefetch_factor=2)
+    train_loader = DataLoader(
+        Dataset_fun(args.train_data, **dataset_kwargs),
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        prefetch_factor=2
+    )
+
+    val_loader = DataLoader(
+        Dataset_fun(args.val_data, **dataset_kwargs),
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        prefetch_factor=2
+    )
 
     # 4. Compilation PyTorch 2.0
     try:

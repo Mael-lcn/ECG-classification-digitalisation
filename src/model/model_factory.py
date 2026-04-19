@@ -76,7 +76,7 @@ def get_shared_parser():
     group_train.add_argument('--batch_size_theoric', type=int, default=64, help="Taille du batch de MAJ du gradient")
     group_train.add_argument('--batch_size_accumulat', type=int, default=64, help="Taille du batch d'inference")
 
-    group_train.add_argument('--mega_batch_factor', type=int, default=16,
+    group_train.add_argument('--mega_batch_factor', type=int, default=32,
                              help="Granularité du tri. Haut = padding optimisé, Bas = + d'aléatoire")
     group_train.add_argument('--use_static_padding', action='store_true', default=False,
                              help="Force une taille de padding fixe (universelle)")
