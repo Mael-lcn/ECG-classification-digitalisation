@@ -108,7 +108,7 @@ def create_attention_mask(valid_lens, max_len, device):
     Fonctionne pour les ECG 1D (valid_lens = batch_lens, max_len = target_t)
     ET pour les Images 2D (valid_lens = num_windows, max_len = target_num_images).
     
-    True = Padding (ignorer), False = Valide (garder).
+    True = Valide (garder), False = Padding (ignorer)
     """
     steps = torch.arange(max_len, device=device).unsqueeze(0)
     valid_lens = valid_lens.to(device, non_blocking=True).unsqueeze(1)

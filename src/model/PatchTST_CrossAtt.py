@@ -55,17 +55,18 @@ class PatchTST_CrossAtt(nn.Module):
         ctx_len = self.config.context_length
 
         if obs_mask is not None:
-        # Si le masque est [B, T], on l'étend en [B, T, C]
-            if obs_mask.dim() == 2:
-                obs_mask = obs_mask.unsqueeze(-1).expand(-1, -1, C)
-            # Si le masque est [B, C, T], on le remet en [B, T, C]
-            elif obs_mask.shape[1] == C:
-                obs_mask = obs_mask.transpose(1, 2)
+            # obs_mask vient de create_attention_mask et est [B, T]
+            # On l'étend pour chaque canal pour satisfaire Channel Independence
+            obs_mask = obs_mask.unsqueeze(-1).expand(-1, -1, C)
 
         # Cas 1 : Signal inférieur ou égal à la taille de contexte
         if T <= ctx_len:
             pad_len = ctx_len - T
             x = F.pad(x, (0, pad_len))
+
+            if obs_mask is not None:
+                # obs_mask est [B, T, C], on pad la dimension T (dim 1)
+                obs_mask = F.pad(obs_mask, (0, 0, 0, pad_len))
 
             x = x.transpose(1, 2)
             outputs = self.backbone(past_values=x, past_observed_mask=obs_mask)
