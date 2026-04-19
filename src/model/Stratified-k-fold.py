@@ -1,11 +1,7 @@
 import os, sys
+from pathlib import Path
 import argparse
-import re
-import time
 import math
-from tqdm import tqdm
-import glob
-import shutil
 import warnings
 
 import wandb
@@ -14,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchmetrics.classification import MultilabelAveragePrecision
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
@@ -27,7 +22,7 @@ from train import generate_exp_name, load_pos_weight, run_training_loop
 # On dit à Python tkt c'est pas grave pour ce warning précis
 warnings.filterwarnings("ignore", message=".*Length of IterableDataset.*")
 
-TOTAL_NB_FILE = 27  # Nombre total de file dans le dataset complet (train + val + test)
+TOTAL_NB_FILE = 54  # Nombre total de file dans le dataset complet (train + val + test)
 torch.set_float32_matmul_precision('high')
 
 need_compile = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
@@ -44,6 +39,53 @@ def create_fold(train_path, val_path, eval_path):
     }
 
     return repartition
+
+
+def create_dataloader(args, fichiers, dataset_kwargs, Dataset_fun):
+    # Création des Datasets
+    train_ds = Dataset_fun(
+        data_path=args.train_data,
+        **dataset_kwargs
+    )
+
+    val_ds = Dataset_fun(
+        data_path=args.val_data, 
+        **dataset_kwargs
+    )
+
+    test_ds = Dataset_fun(
+        data_path=args.val_data, 
+        **dataset_kwargs
+    )
+
+    # Création des DataLoaders
+    # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=(args.workers > 0), 
+        prefetch_factor=2
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=(args.workers > 0),
+        prefetch_factor=2
+    )
+
+    tes_loader = DataLoader(
+        test_ds,
+        batch_size=None,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=(args.workers > 0),
+        prefetch_factor=2
+    )
 
 
 def run(args):
@@ -128,8 +170,8 @@ def run(args):
     wandb.define_metric("train/loss", step_metric="epoch")
     wandb.define_metric("perf/*", step_metric="epoch")
 
-    print(f"Début de l'expérience : {exp_name}")
-    print(f"[INIT] Préparation des TurboDatasets (Format .npy)...")
+    # Récupère le chemin de chaque file composant le dataset
+    fichiers = [f.absolute() for f in Path(args.source_folder).rglob("*signals.npy") if f.is_file()]
 
     mb_size = args.batch_size_theoric * args.mega_batch_factor
     dataset_kwargs = {
@@ -141,50 +183,10 @@ def run(args):
     if gen_fun is not None:
         dataset_kwargs["generate_img"] = gen_fun
 
-    # Création des Datasets
-    train_ds = Dataset_fun(
-        data_path=args.train_data,
-        **dataset_kwargs
-    )
+    print(f"Début de l'expérience : {exp_name}")
+    print(f"[INIT] Préparation des TurboDatasets (Format .npy)...")
 
-    val_ds = Dataset_fun(
-        data_path=args.val_data, 
-        **dataset_kwargs
-    )
-
-    test_ds = Dataset_fun(
-        data_path=args.val_data, 
-        **dataset_kwargs
-    )
-
-    # Création des DataLoaders
-    # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=(args.workers > 0), 
-        prefetch_factor=2
-    )
-
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=(args.workers > 0),
-        prefetch_factor=2
-    )
-
-    tes_loader = DataLoader(
-        test_ds,
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=(args.workers > 0),
-        prefetch_factor=2
-    )
+    train_loader, train_loader, train_loader = create_dataloader(args, fichiers, dataset_kwargs, Dataset_fun)
 
     # Compilation PyTorch 2.0
     try:
@@ -192,7 +194,6 @@ def run(args):
             model = torch.compile(model)
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré ou échoué: {e}")
-
 
     # On sépare les paramètres en deux groupes
     backbone_params = []
@@ -245,18 +246,18 @@ def run(args):
     if args.resume_from and os.path.exists(args.resume_from):
         print(f"[RESUME] Chargement du checkpoint depuis : {args.resume_from}")
         checkpoint = torch.load(args.resume_from, map_location=device)
-        
+
         # Chargement strict du nouveau format de Checkpoint robuste
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
         model.load_state_dict(state_dict, strict=False)
-        
+
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_pr_auc = checkpoint.get('best_val_pr_auc', -1)
-        
+
         if scaler_amp and 'scaler_state_dict' in checkpoint:
             scaler_amp.load_state_dict(checkpoint['scaler_state_dict'])
-            
+
         print(f"[RESUME] Reprise confirmée à l'époque {start_epoch} (Best score précédent: {best_val_pr_auc:.4f})")
 
     # Si reprise WandB SANS args.resume_from (ex: on a juste l'ID mais on repart de zéro)
@@ -306,15 +307,18 @@ def main():
     )
 
     # Arguments Dossiers & Fichiers
-    parser.add_argument('--train_data', type=str, default="../../../output/cross_val_data/train", 
+    parser.add_argument('--source_folder', type=str, default="../../../output/final_data", 
                         help="Dossier contenant les fichiers H5 de train")
-    parser.add_argument('--val_data', type=str, default="../../../output/cross_val_data/val", 
-                        help="Dossier contenant les fichiers H5 de validation")
-    parser.add_argument('--test_data', type=str, default="../../../output/cross_val_data/test", 
-                        help="Dossier contenant les fichiers H5 de validation")
 
     # Hyperparamètres
-    parser.add_argument('-k', type=int, default=5, help="Nombre de plis (folds) pour la validation croisée")
+    # Chaque pli contient 6 fichiers
+    # Train : 42 fichiers (7 plis)
+    """
+    Validation (Seuil) : 6 fichiers (1 pli)
+
+    Test (Éval) : 6 fichiers (1 pli)
+    """
+    parser.add_argument('-k', type=int, default=9, help="Nombre de plis (folds) pour la validation croisée")
     parser.add_argument('--epochs', type=int, default=80, help="Nombre max d'époques")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate initial")
     parser.add_argument('--backbone_lr', type=float, default=1e-4, help="Learning Rate initial for the backbone")

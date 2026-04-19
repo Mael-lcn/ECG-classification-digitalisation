@@ -16,6 +16,7 @@ project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
 from model_factory import get_shared_parser, build_model
+from train import material_config
 
 
 
@@ -326,33 +327,7 @@ def main():
     multiprocessing.set_start_method("spawn", force=True)     
     torch.set_num_threads(args.workers)         
 
-    use_amp = not args.not_use_amp
-
-    if torch.cuda.is_available():
-        # Nettoyage mémoire préventif
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-
-        # Assignation du device
-        device = torch.device(f"cuda:{args.gpu}")
-
-        # 3. Optimisations d'Attention PyTorch 2.0+
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-        torch.backends.cuda.enable_math_sdp(True)
-
-        # 4. Choix de la précision (BFloat16 vs Float16)
-        if use_amp and torch.cuda.is_bf16_supported():
-            amp_dtype = torch.bfloat16
-            print(f"[INIT] Mode: CUDA ({device}) | Matériel Ampere+ : BFloat16 activé")
-        else:
-            amp_dtype = torch.float16
-            print(f"[INIT] Mode: CUDA ({device}) | Fallback : Float16 (AMP={use_amp})")
-    else:
-        # Fallback total sur CPU
-        device = torch.device("cpu")
-        amp_dtype = torch.float16 
-        print("[INIT] Mode: CPU | Optimisations CUDA désactivées")
+    device, use_amp, amp_dtype = material_config(args)
 
     # Load classes
     with open(args.class_map) as f:
