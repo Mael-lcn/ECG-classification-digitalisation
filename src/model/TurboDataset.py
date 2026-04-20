@@ -120,6 +120,7 @@ class TurboDataset(IterableDataset):
 
                     if b_len.max() < 50:
                         # On calcule l'offset global dans le fichier pour savoir de quel échantillon on parle
+                        """
                         global_idx_start = start + j
                         print(f"\n[CRITICAL DATA ERROR]")
                         print(f"  - Fichier Shard : {os.path.basename(sig_f)}")
@@ -127,6 +128,7 @@ class TurboDataset(IterableDataset):
                         print(f"  - Longueurs trouvées dans le batch : {b_len.tolist()}")
                         print(f"  - Statut : BATCH IGNORÉ (Trop court pour l'architecture CNN)")
                         print("-" * 30)
+                        """
                         continue
 
                     # Stratégie de padding dynamique optimisée par le tri
