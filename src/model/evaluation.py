@@ -1,4 +1,5 @@
-import os, shutil
+import os
+import shutil
 import sys
 import json
 import argparse
@@ -6,7 +7,6 @@ import numpy as np
 import torch
 
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 import multiprocessing
 import csv
 
@@ -16,86 +16,53 @@ project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
 from model_factory import get_shared_parser, build_model
+from core_utils import (
+    setup_global_environment,
+    setup_wandb,
+    run_inference,
+    load_checkpoint
+)
 
 
 
-torch.set_float32_matmul_precision('high')  # Test d'optimisation
-
-
-# Compute recording-wise accuracy.
 def compute_accuracy(labels, outputs):
     num_recordings = labels.shape[0]
     correct = np.all(labels == outputs, axis=1)
     return float(np.sum(correct)) / float(num_recordings)
 
-
-# Compute confusion matrices.
 def compute_confusion_matrices(labels, outputs, normalize=False):
-    # Compute a binary confusion matrix for each class k:
-    #
-    #     [TN_k FN_k]
-    #     [FP_k TP_k]
-    #
-    # If the normalize variable is set to true, then normalize the contributions
-    # to the confusion matrix by the number of labels per recording.
     num_recordings, num_classes = np.shape(labels)
-
     if not normalize:
         A = np.zeros((num_classes, 2, 2))
         for i in range(num_recordings):
             for j in range(num_classes):
-                if labels[i, j]==1 and outputs[i, j]==1: # TP
-                    A[j, 1, 1] += 1
-                elif labels[i, j]==0 and outputs[i, j]==1: # FP
-                    A[j, 1, 0] += 1
-                elif labels[i, j]==1 and outputs[i, j]==0: # FN
-                    A[j, 0, 1] += 1
-                elif labels[i, j]==0 and outputs[i, j]==0: # TN
-                    A[j, 0, 0] += 1
-                else: # This condition should not happen.
-                    raise ValueError('Error in computing the confusion matrix.')
+                if labels[i, j]==1 and outputs[i, j]==1: A[j, 1, 1] += 1
+                elif labels[i, j]==0 and outputs[i, j]==1: A[j, 1, 0] += 1
+                elif labels[i, j]==1 and outputs[i, j]==0: A[j, 0, 1] += 1
+                elif labels[i, j]==0 and outputs[i, j]==0: A[j, 0, 0] += 1
     else:
         A = np.zeros((num_classes, 2, 2))
         for i in range(num_recordings):
             normalization = float(max(np.sum(labels[i, :]), 1))
             for j in range(num_classes):
-                if labels[i, j]==1 and outputs[i, j]==1: # TP
-                    A[j, 1, 1] += 1.0/normalization
-                elif labels[i, j]==0 and outputs[i, j]==1: # FP
-                    A[j, 1, 0] += 1.0/normalization
-                elif labels[i, j]==1 and outputs[i, j]==0: # FN
-                    A[j, 0, 1] += 1.0/normalization
-                elif labels[i, j]==0 and outputs[i, j]==0: # TN
-                    A[j, 0, 0] += 1.0/normalization
-                else: # This condition should not happen.
-                    raise ValueError('Error in computing the confusion matrix.')
-
+                if labels[i, j]==1 and outputs[i, j]==1: A[j, 1, 1] += 1.0/normalization
+                elif labels[i, j]==0 and outputs[i, j]==1: A[j, 1, 0] += 1.0/normalization
+                elif labels[i, j]==1 and outputs[i, j]==0: A[j, 0, 1] += 1.0/normalization
+                elif labels[i, j]==0 and outputs[i, j]==0: A[j, 0, 0] += 1.0/normalization
     return A
 
-
-# Compute macro F-measure.
 def compute_f_measure(labels, outputs):
     num_recordings, num_classes = np.shape(labels)
-
     A = compute_confusion_matrices(labels, outputs)
-
     f_measure = np.zeros(num_classes)
     for k in range(num_classes):
         tp, fp, fn, tn = A[k, 1, 1], A[k, 1, 0], A[k, 0, 1], A[k, 0, 0]
-        if 2 * tp + fp + fn:
-            f_measure[k] = float(2 * tp) / float(2 * tp + fp + fn)
-        else:
-            f_measure[k] = float('nan')
+        if 2 * tp + fp + fn: f_measure[k] = float(2 * tp) / float(2 * tp + fp + fn)
+        else: f_measure[k] = float('nan')
 
-    if np.any(np.isfinite(f_measure)):
-        macro_f_measure = np.nanmean(f_measure)
-    else:
-        macro_f_measure = float('nan')
-
+    macro_f_measure = np.nanmean(f_measure) if np.any(np.isfinite(f_measure)) else float('nan')
     return macro_f_measure, f_measure
 
-
-# Compute macro AUROC and macro AUPRC.
 def compute_auc(labels, outputs):
     num_recordings, num_classes = labels.shape
     auroc = np.zeros(num_classes)
@@ -106,11 +73,7 @@ def compute_auc(labels, outputs):
         thresholds = np.append(thresholds, thresholds[-1] + 1)
         thresholds = thresholds[::-1]
 
-        tp = np.zeros(len(thresholds))
-        fp = np.zeros(len(thresholds))
-        fn = np.zeros(len(thresholds))
-        tn = np.zeros(len(thresholds))
-
+        tp, fp, fn, tn = np.zeros(len(thresholds)), np.zeros(len(thresholds)), np.zeros(len(thresholds)), np.zeros(len(thresholds))
         fn[0] = np.sum(labels[:, k] == 1)
         tn[0] = np.sum(labels[:, k] == 0)
 
@@ -138,22 +101,15 @@ def compute_auc(labels, outputs):
 
     return np.nanmean(auroc), np.nanmean(auprc), auroc, auprc
 
-
 def compute_modified_confusion_matrix(labels, outputs):
     num_recordings, num_classes = labels.shape
     A = np.zeros((num_classes, num_classes))
-
     for i in range(num_recordings):
-        # Calculate union count for this specific recording
         union_count = np.sum(labels[i] | outputs[i])
         if union_count > 0:
-            # Use outer product to fill the matrix for this recording
-            # (replaces 'for j' and 'for k' loops)
             A += np.outer(labels[i], outputs[i]) / float(union_count)
-            
     return A
 
-# Compute the evaluation metric for the Challenge.
 def compute_challenge_metric(weights, labels, outputs, classes, sinus_rhythm):
     num_recordings, num_classes = labels.shape
     if sinus_rhythm in classes:
@@ -161,16 +117,13 @@ def compute_challenge_metric(weights, labels, outputs, classes, sinus_rhythm):
     else:
         raise ValueError('The sinus rhythm class is not available.')
 
-    # Compute the observed score.
     A = compute_modified_confusion_matrix(labels, outputs)
     observed_score = np.nansum(weights * A)
 
-    # Compute the score for the model that always chooses the correct label(s).
     correct_outputs = labels
     A = compute_modified_confusion_matrix(labels, correct_outputs)
     correct_score = np.nansum(weights * A)
 
-    # Compute the score for the model that always chooses the sinus rhythm class.
     inactive_outputs = np.zeros((num_recordings, num_classes), dtype=np.bool_)
     inactive_outputs[:, sinus_rhythm_index] = 1
     A = compute_modified_confusion_matrix(labels, inactive_outputs)
@@ -183,47 +136,6 @@ def compute_challenge_metric(weights, labels, outputs, classes, sinus_rhythm):
 
     return normalized_score
 
-
-def evaluate(model, dataloader, device, threshold, use_amp, amp_dtype):
-    model.eval()
-    all_labels, all_probs, all_binary = [], [], []
-
-    with torch.no_grad():
-        for x, y, batch_mask in tqdm(dataloader, desc="[EVAL]"):
-            # x is [1, Batch, Channels, H, W] or [1, Batch, Channels, Length]
-            if x.shape[0] == 1:
-                x = x.squeeze(0)          # [Batch, Channels, ...]
-                y = y.squeeze(0)          # [Batch, Labels]
-                batch_mask = batch_mask.squeeze(0)
-
-            x = x.to(device)
-            y = y.to(device)
-            batch_mask = batch_mask.to(device)
-
-            if x.shape[-1] == 0:
-                print(f"\n[SKIP] Donnée invalide détectée : shape={x.shape}. Vérifiez le prétraitement.")
-                continue # Passe à l'ECG suivant au lieu de faire crash le modèle
-
-            with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
-                probs = torch.sigmoid(model(x, batch_mask=batch_mask))
-
-            binary = (probs >= threshold).int()
-
-            all_labels.append(y.cpu())
-            all_probs.append(probs.cpu())
-            all_binary.append(binary.cpu())
-
-    labels = torch.cat(all_labels).numpy().astype(bool)
-    probs = torch.cat(all_probs).cpu().float().numpy()
-    binary = torch.cat(all_binary).numpy().astype(bool)
-
-    return labels, binary, probs
-
-
-"""
-Some utility functions for loading tables and weights
-"""
-# Check if a variable is a number or represents a number.
 def is_number(x):
     try:
         float(x)
@@ -231,228 +143,126 @@ def is_number(x):
     except (ValueError, TypeError):
         return False
 
-# Check if a variable is a a finite number or represents a finite number.
 def is_finite_number(x):
-    if is_number(x):
-        return np.isfinite(float(x))
-    else:
-        return False
+    return np.isfinite(float(x)) if is_number(x) else False
 
-# Load a table with row and column names.
 def load_table(table_file):
-    # The table should have the following form:
-    #
-    # ,    a,   b,   c
-    # a, 1.2, 2.3, 3.4
-    # b, 4.5, 5.6, 6.7
-    # c, 7.8, 8.9, 9.0
-    #
     table = list()
     with open(table_file, 'r') as f:
         for i, l in enumerate(f):
             arrs = [arr.strip() for arr in l.split(',')]
             table.append(arrs)
 
-    # Define the numbers of rows and columns and check for errors.
     num_rows = len(table)-1
-    if num_rows<1:
-        raise Exception('The table {} is empty.'.format(table_file))
+    if num_rows<1: raise Exception('The table {} is empty.'.format(table_file))
     row_lengths = set(len(table[i])-1 for i in range(num_rows))
-    if len(row_lengths)!=1:
-        raise Exception('The table {} has rows with different lengths.'.format(table_file))
+    if len(row_lengths)!=1: raise Exception('The table {} has rows with different lengths.'.format(table_file))
     num_cols = min(row_lengths)
-    if num_cols<1:
-        raise Exception('The table {} is empty.'.format(table_file))
+    if num_cols<1: raise Exception('The table {} is empty.'.format(table_file))
 
-    # Find the row and column labels.
     rows = [table[0][j+1] for j in range(num_rows)]
     cols = [table[i+1][0] for i in range(num_cols)]
 
-    # Find the entries of the table.
     values = np.zeros((num_rows, num_cols), dtype=np.float64)
     for i in range(num_rows):
         for j in range(num_cols):
             value = table[i+1][j+1]
-            if is_finite_number(value):
-                values[i, j] = float(value)
-            else:
-                values[i, j] = float('nan')
+            values[i, j] = float(value) if is_finite_number(value) else float('nan')
 
     return rows, cols, values
 
 def load_weights(weights_file):
-    # Load the table with the weight matrix.
     rows, cols, values = load_table(weights_file)
-
     assert(rows == cols)
-
-    # Identify the classes and the weight matrix.
-    classes = rows
-    weights = values
-
-    return classes, weights
-
+    return rows, values
 
 def round_val(val, digits=5):
     try:
-        if val is not None and np.isfinite(val):
-            return round(float(val), digits)
+        if val is not None and np.isfinite(val): return round(float(val), digits)
         return val
     except:
         return val
 
 
 def main():
-        # On récupère le parser de base
     shared_parser = get_shared_parser()
-
-    # On crée le parser de train en héritant du shared_parser
-    parser = argparse.ArgumentParser(
-        description="Script de test", 
-        parents=[shared_parser]
-    )
-
+    parser = argparse.ArgumentParser(description="Script d'évaluation finale", parents=[shared_parser])
     parser.add_argument('--data', default="../../../output/final_data/test", help="HDF5 test dataset directory")
     parser.add_argument('-c', '--checkpoint', required=True, help="path to checkpoint.pt")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
-
-    parser.add_argument('--threshold', type=float, default=0.5, help="seuil du model")
+    parser.add_argument('--threshold', type=float, default=0.5, help="Seuil de décision du modèle")
 
     args = parser.parse_args()
 
-    checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
-
-    # multiprocessing set up
+    # Multiprocessing
     multiprocessing.set_start_method("spawn", force=True)     
     torch.set_num_threads(args.workers)         
 
-    use_amp = not args.not_use_amp
+    device, use_amp, amp_dtype = setup_global_environment(args)
 
-    if torch.cuda.is_available():
-        # Nettoyage mémoire préventif
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-
-        # Assignation du device
-        device = torch.device(f"cuda:{args.gpu}")
-
-        # 3. Optimisations d'Attention PyTorch 2.0+
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-        torch.backends.cuda.enable_math_sdp(True)
-
-        # 4. Choix de la précision (BFloat16 vs Float16)
-        if use_amp and torch.cuda.is_bf16_supported():
-            amp_dtype = torch.bfloat16
-            print(f"[INIT] Mode: CUDA ({device}) | Matériel Ampere+ : BFloat16 activé")
-        else:
-            amp_dtype = torch.float16
-            print(f"[INIT] Mode: CUDA ({device}) | Fallback : Float16 (AMP={use_amp})")
-    else:
-        # Fallback total sur CPU
-        device = torch.device("cpu")
-        amp_dtype = torch.float16 
-        print("[INIT] Mode: CPU | Optimisations CUDA désactivées")
-
-    # Load classes
+    # Classes & Poids
     with open(args.class_map) as f:
-        class_list = json.load(f)
-    classes = class_list
-
-    # Load weights
+        classes = json.load(f)
     weight_classes, weights = load_weights(args.weights)
     assert weight_classes == classes, "Class order mismatch with weights.csv"
 
-    # ================= CONFIGURATION WANDB =================
-    wandb_id = wandb.util.generate_id()
-
-    os.makedirs(args.output, exist_ok=True)
-
-    # 1. On définit le répertoire de base 
-    base_wandb_path = os.path.join(args.output, "wandb_logs")
-    os.makedirs(base_wandb_path, exist_ok=True)
-
-    # 2. On force tout
-    os.environ["WANDB_MODE"] = "offline"
-    os.environ["WANDB_DIR"] = base_wandb_path
-    os.environ["WANDB_CACHE_DIR"] = os.path.join(base_wandb_path, "cache")
-    os.environ["WANDB_DATA_DIR"] = base_wandb_path 
-    # Pour tempfile (utilisé par artifact.add_file) :
-    os.environ["TMPDIR"] = os.path.join(base_wandb_path, "tmp")
-
-    os.makedirs(os.environ["WANDB_CACHE_DIR"], exist_ok=True)
-    os.makedirs(os.environ["TMPDIR"], exist_ok=True)
-
-    # Récupère le nom du groups
     base_name = args.checkpoint.split('_ep')[0]
     group_id = base_name.split('-')[-1]
+    run_name = f"test_{args.model_name}_{wandb.util.generate_id()[:6]}"
 
-    wandb.init(
-        project="ECG_Classification_Experiments",
-        group=group_id,
-        job_type="eval",
-        name=f"test_{args.model_name}_{wandb_id[:6]}",
-        id=wandb_id,
-        config={
-            "checkpoint_source": checkpoint_path,
-            "test_batch_size": args.batch_size_theoric,
-            "use_static_padding": args.use_static_padding,
-            "model_tested": args.model_name
-        },
-        tags=["eval", "final_test", args.model_name, "offline"]
+    # On ajoute des infos supplémentaires spécifiques à l'eval dans l'objet args pour qu'elles soient logguées
+    args.checkpoint_source = args.checkpoint
+
+    setup_wandb(
+        args=args, 
+        job_type="eval", 
+        run_name=run_name, 
+        group=group_id, 
+        tags=["eval", "final_test"]
     )
 
-    print(f"Début de l'évaluation : {args.checkpoint}")
+    print(f"Début de l'évaluation du checkpoint : {args.checkpoint}")
 
-
-    # MODEL
     model, _, Dataset_fun, gen_fun = build_model(args)
     model = model.to(device)
-    # chargement utilisant le chemin dicté par le fichier json
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
-    model.load_state_dict(state_dict, strict=True)
 
-    # DATASET & DATALOADER
+    checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
+    load_checkpoint(checkpoint_path, model, device=device)
+
+    # Dataloaders
     mb_size = args.batch_size_theoric * args.mega_batch_factor
-
     dataset_kwargs = {
         "batch_size": args.batch_size_accumulat,
         "mega_batch_size": mb_size,
         "use_static_padding": args.use_static_padding
     }
+    if gen_fun is not None: dataset_kwargs["generate_img"] = gen_fun
 
-    if gen_fun is not None:
-        dataset_kwargs["generate_img"] = gen_fun
-
-    # Création du Dataset de test
-    test_ds = Dataset_fun(
-        data_path=args.data,
-        **dataset_kwargs
-    )
-
-    # Création des DataLoaders
-    # IMPORTANT : batch_size=None car le Dataset renvoie déjà des batchs formés
+    test_ds = Dataset_fun(data_path=args.data, is_train=False,**dataset_kwargs)
     test_loader = DataLoader(
-        test_ds,
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=(args.workers > 0), 
-        prefetch_factor=2
+        test_ds, batch_size=None, num_workers=args.workers,
+        pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2
     )
 
-    print("inférence en cours...")
-    labels, binary, probs = evaluate(model, test_loader, device, args.threshold, use_amp, amp_dtype)
+    print("Inférence en cours...")
+    labels, probs, _ = run_inference(
+        model, test_loader, device, use_amp, amp_dtype, 
+        desc="[EVAL]", squeeze_batch=True
+    )
+
+    # Binarisation selon le seuil
+    binary = (probs >= args.threshold).astype(bool)
+
+    # 6. Calcul des métriques
     print('- AUROC and AUPRC...')
     auroc, auprc, auroc_c, auprc_c = compute_auc(labels, probs)
+
     print('- Accuracy...')
     final_acc = compute_accuracy(labels, binary)
     print('- F-measure...')
     final_f1, final_f1_c = compute_f_measure(labels, binary)
 
     A = compute_confusion_matrices(labels, binary)
-    # Per-class sensitivity (recall) and specificity
     sensitivity = np.zeros(len(classes))
     specificity = np.zeros(len(classes))
     for k in range(len(classes)):
@@ -462,97 +272,56 @@ def main():
 
     print('- Challenge metric...')
     final_challenge = compute_challenge_metric(weights, labels, binary, classes, "NSR")
-    print('Done.')
+    print('Terminé.')
 
-    # ================= LOGGING WANDB =================
-    # Global metrics
+    # 7. LOGGING WANDB & SAUVEGARDE CSV
     metrics = {
-        "eval/AUROC":           round_val(auroc),
-        "eval/AUPRC":           round_val(auprc),
-        "eval/Accuracy":        round_val(final_acc),
-        "eval/Macro_F1":        round_val(final_f1),
+        "eval/AUROC": round_val(auroc), "eval/AUPRC": round_val(auprc),
+        "eval/Accuracy": round_val(final_acc), "eval/Macro_F1": round_val(final_f1),
         "eval/Challenge_Score": round_val(final_challenge),
     }
     wandb.log(metrics)
 
-    # Summary (visible at first glance on dashboard)
-    wandb.run.summary["AUROC"]           = round_val(auroc)
-    wandb.run.summary["AUPRC"]           = round_val(auprc)
-    wandb.run.summary["Accuracy"]        = round_val(final_acc)
-    wandb.run.summary["Macro_F1"]        = round_val(final_f1)
-    wandb.run.summary["Challenge_Score"] = round_val(final_challenge)
-    wandb.run.summary["checkpoint"]      = checkpoint_path
+    wandb.run.summary.update(metrics)
+    wandb.run.summary["checkpoint"] = checkpoint_path
 
-    # Per-class table
     class_table = wandb.Table(columns=["Class", "Applied_Threshold", "F1", "AUROC", "AUPRC", "Sensitivity", "Specificity"])
     for i, cls in enumerate(classes):
-        f1_val    = round_val(final_f1_c[i])
-        auroc_val = round_val(auroc_c[i])
-        auprc_val = round_val(auprc_c[i])
-        sens_val  = round_val(sensitivity[i])
-        spec_val  = round_val(specificity[i])
-        class_table.add_data(cls, args.threshold, f1_val, auroc_val, auprc_val, sens_val, spec_val)
+        class_table.add_data(
+            cls, args.threshold, round_val(final_f1_c[i]), round_val(auroc_c[i]), 
+            round_val(auprc_c[i]), round_val(sensitivity[i]), round_val(specificity[i])
+        )
     wandb.log({"eval/per_class_metrics": class_table})
 
-
-   # ================= SAVE CSV =================
-    # On nettoie le nom pour éviter l'extension .pt dans le nom du CSV
     name = args.checkpoint.replace('.pt', '')
-
     output_csv = os.path.join(args.output, f"{name}_metrics.csv")
     with open(output_csv, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['AUROC', 'AUPRC', 'Accuracy', 'Macro_F1', 'Challenge_Score'])
-        writer.writerow([
-            round_val(auroc), round_val(auprc), round_val(final_acc), 
-            round_val(final_f1), round_val(final_challenge)
-        ])
-    print(f"Overall metrics saved to {output_csv}")
+        writer.writerow([round_val(auroc), round_val(auprc), round_val(final_acc), round_val(final_f1), round_val(final_challenge)])
 
     output_csv_per_class = os.path.join(args.output, f"{name}_metrics_per_class.csv")
     with open(output_csv_per_class, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['Class', 'Applied_Threshold', 'F1', 'AUROC', 'AUPRC', 'Sensitivity', 'Specificity'])
         for i, cls in enumerate(classes):
-            writer.writerow([
-                cls, 
-                args.threshold, 
-                round_val(final_f1_c[i]), 
-                round_val(auroc_c[i]), 
-                round_val(auprc_c[i]), 
-                round_val(sensitivity[i]), 
-                round_val(specificity[i])
-            ])
-    print(f"Per-class metrics saved to {output_csv_per_class}")
+            writer.writerow([cls, args.threshold, round_val(final_f1_c[i]), round_val(auroc_c[i]), round_val(auprc_c[i]), round_val(sensitivity[i]), round_val(specificity[i])])
 
-    # ================= ARTIFACT UPLOAD  =================
     try:
-        # 1. Copier les CSV dans le dossier interne de W&B pour la synchro
         csv_interne_1 = os.path.join(wandb.run.dir, os.path.basename(output_csv))
         csv_interne_2 = os.path.join(wandb.run.dir, os.path.basename(output_csv_per_class))
         shutil.copy2(output_csv, csv_interne_1)
         shutil.copy2(output_csv_per_class, csv_interne_2)
 
-        # 2. Créer l'artefact (type "evaluation-data" pour séparer des modèles)
         artifact = wandb.Artifact(f"eval-results-{wandb.run.id}", type="evaluation-data")
-
-        # 3. Ajouter les copies internes à l'artefact
         artifact.add_file(csv_interne_1, name=os.path.basename(output_csv))
         artifact.add_file(csv_interne_2, name=os.path.basename(output_csv_per_class))
-
-        # On log l'artefact sur W&B
         wandb.log_artifact(artifact)
-        print("[WANDB] Résultats CSV ajoutés aux artefacts avec succès.")
     except Exception as e:
-        print(f"[WARN] Artifact upload skipped/failed: {e}")
+        print(f"[WARN] Artifact upload failed: {e}")
 
-    # On clôture le run W&B seulement une fois que TOUT est loggué et sauvegardé
     wandb.finish()
 
 
-
 if __name__ == "__main__":
-    # Configuration PyTorch pour éviter la fragmentation mémoire CUDA
-    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
     main()

@@ -33,8 +33,8 @@ class PatchTST_CrossAtt(nn.Module):
         )
 
         self.backbone = PatchTSTModel(self.config)
-
         self.use_cross_att = PT_use_cross_att
+
         if PT_use_cross_att:
             self.cross_att = nn.MultiheadAttention(
                 embed_dim=PT_d_model, 
@@ -44,21 +44,28 @@ class PatchTST_CrossAtt(nn.Module):
             self.query_token = nn.Parameter(torch.randn(1, 1, PT_d_model))
 
         self.classifier = nn.Sequential(
-            nn.Linear(PT_d_model, 64),
+            nn.Linear(PT_d_model, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, num_classes)
+            nn.Dropout(0.3),
+            nn.Linear(128, num_classes)
         )
 
     def forward(self, x, obs_mask=None, **kwargs):
         B, C, T = x.shape
         ctx_len = self.config.context_length
 
+        if obs_mask is not None:
+            # obs_mask vient de create_attention_mask et est [B, T]
+            # On l'étend pour chaque canal pour satisfaire Channel Independence
+            obs_mask = obs_mask.unsqueeze(-1).expand(-1, -1, C)
+
         # Cas 1 : Signal inférieur ou égal à la taille de contexte
         if T <= ctx_len:
             pad_len = ctx_len - T
             x = F.pad(x, (0, pad_len))
+
             if obs_mask is not None:
+                # obs_mask est [B, T, C], on pad la dimension T (dim 1)
                 obs_mask = F.pad(obs_mask, (0, 0, 0, pad_len))
 
             x = x.transpose(1, 2)
@@ -77,7 +84,7 @@ class PatchTST_CrossAtt(nn.Module):
             logits = self.classifier(out)
             return logits
 
-        # Cas 2 : Signal long traité par mini-lots de blocs (chunks)
+        # Cas 2 : Signal long traité par mini-lots de blocs
         else:
             num_chunks = math.ceil(T / ctx_len)
             pad_len = (num_chunks * ctx_len) - T
@@ -86,11 +93,11 @@ class PatchTST_CrossAtt(nn.Module):
             x_padded = F.pad(x, (0, pad_len)) 
             x_chunks = x_padded.view(B, num_chunks, C, ctx_len)
 
+            mask_chunks = None
             if obs_mask is not None:
-                mask_padded = F.pad(obs_mask, (0, 0, 0, pad_len))
-                mask_chunks = mask_padded.view(B, num_chunks, ctx_len, C)
-            else:
-                mask_chunks = None
+                # obs_mask est [B, T, C], on pad le temps (dim 1)
+                m_padded = F.pad(obs_mask, (0, 0, 0, pad_len)) 
+                mask_chunks = m_padded.view(B, num_chunks, ctx_len, C)
 
             chunk_outputs = []
             chunk_batch_size = 128  # Paramètre d'optimisation : nombre de blocs traités simultanément
@@ -127,7 +134,7 @@ class PatchTST_CrossAtt(nn.Module):
             # Concaténation de tous les sous-groupes de blocs : [B, num_chunks, C, d_model]
             out = torch.cat(chunk_outputs, dim=1) 
 
-            # Moyenne temporelle sur l'ensemble des blocs : [B, C, d_model]
+            # Max temporelle sur l'ensemble des blocs : [B, C, d_model]
             out, _ = torch.max(out, dim=1) 
 
             # Application de la Cross-Attention

@@ -7,7 +7,6 @@ import pandas as pd
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
-# Résolution du chemin absolu pour les imports du projet
 root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(root))
 
@@ -22,139 +21,133 @@ MAX_SIGNAL_LENGTH = MAX_TEMPS * TARGET_FREQ + 10
 
 class TurboDataset(IterableDataset):
     """
-    Dataset itérable optimisé.
+    Dataset itérable de niveau industriel.
     
-    Cette classe implémente une stratégie de lecture hybride type Mega-Batch Streaming.
-    Plutôt que d'effectuer des requêtes I/O aléatoires (qui saturent les disques réseaux) ou de 
-    charger des fichiers entiers en mémoire vive, l'itérateur extrait des blocs de données contigus.
-    Ces blocs sont ensuite mélangés en mémoire vive avant d'être scindés en mini-batchs.
-    
-    Cette approche garantit un débit de lecture disque maximal tout en maintenant une empreinte 
-    mémoire (RAM) strictement bornée et un mélange stochastique de haute qualité.
-
-    Arguments :
-        data_path (str): Chemin vers le répertoire contenant les shards (.npy et .csv).
-        batch_size (int): Nombre d'échantillons par mini-batch envoyé au GPU.
-        mega_batch_size (int): Nombre d'échantillons lus simultanément depuis le disque. 
-            Détermine l'empreinte RAM maximale par worker.
-        use_static_padding (bool): Si True, contraint la dimension temporelle à `max_signal_length`. 
-            Si False, la dimension temporelle s'ajuste dynamiquement au signal le plus long du mini-batch.
-        max_signal_length (int): Dimension temporelle maximale autorisée.
+    Stratégie : 'Global Shuffle, Local Fuzzy Sort'.
+    - I/O : Lecture de blocs contigus (Mega-Batches) pour saturer la bande passante disque.
+    - Padding : Tri local avec 20% de bruit pour minimiser le vide sans biaiser le gradient.
+    - CPU : Offloading de la création du masque vers le GPU en renvoyant uniquement les longueurs.
     """
-
-    def __init__(self, data_path, batch_size=64, mega_batch_size=1024, 
-                 use_static_padding=False, max_signal_length=MAX_SIGNAL_LENGTH):
+    def __init__(self, data_path, batch_size=64, mega_batch_size=8, 
+                 use_static_padding=False, max_signal_length=MAX_SIGNAL_LENGTH,
+                 is_train=True):
         super().__init__()
         self.data_path = data_path
         self.batch_size = batch_size
         self.mega_batch_size = mega_batch_size
         self.use_static_padding = use_static_padding
         self.max_signal_length = max_signal_length
+        self.is_train = is_train
 
-        # Identification des fichiers de signaux
+        # Identification des fichiers shards
         self.shard_files = sorted(glob.glob(os.path.join(data_path, "*_signals.npy")))
         if not self.shard_files:
             raise FileNotFoundError(f"Aucun fichier shard détecté dans {data_path}")
 
-        # Calcul de la volumétrie totale via les métadonnées (mmap_mode='r' pour éviter la charge RAM)
+        # Calcul de la volumétrie totale via mmap pour économiser la RAM
         self.total_samples = 0
         for f in self.shard_files:
             lab_f = f.replace("_signals.npy", "_labels.npy")
             self.total_samples += np.load(lab_f, mmap_mode='r').shape[0]
 
     def __iter__(self):
-        """
-        Générateur de flux de données. 
-        Gère la répartition multiprocessing, la lecture contiguë et le mélange intra-bloc.
-        """
         worker_info = get_worker_info()
         indices_shards = list(range(len(self.shard_files)))
 
-        # Répartition des shards entre les workers du DataLoader
+        # Répartition entre les workers multiprocessing
         if worker_info is not None:
             indices_shards = indices_shards[worker_info.id :: worker_info.num_workers]
 
-        # Mélange global de l'ordre de lecture des shards pour la diversité stochastique
-        np.random.shuffle(indices_shards)
+        # Mélange global des fichiers
+        if self.is_train:
+            np.random.shuffle(indices_shards)
 
         for shard_idx in indices_shards:
             sig_f = self.shard_files[shard_idx]
             lab_f = sig_f.replace("_signals.npy", "_labels.npy")
             met_f = sig_f.replace("_signals.npy", "_meta.csv")
 
-            # Ouverture des descripteurs de fichiers sans chargement en mémoire vive
+            # Ouverture des descripteurs sans chargement immédiat
             sig_mmap = np.load(sig_f, mmap_mode='r')
             lab_all = np.load(lab_f)
-
-            # Utilisation du moteur C de Pandas pour une lecture optimisée des métadonnées
+            # Lecture optimisée des métadonnées via le moteur C de Pandas
             len_all = pd.read_csv(met_f, usecols=['length'], engine='c')['length'].values
 
             shard_len = len(sig_mmap)
-
-            # Découpage logique du shard en indices de blocs contigus (Mega-Batches)
+            # Découpage en Mega-Batches pour l'efficacité I/O
             mb_starts = list(range(0, shard_len, self.mega_batch_size))
-            np.random.shuffle(mb_starts)
+
+            if self.is_train:
+                np.random.shuffle(mb_starts)
 
             for start in mb_starts:
                 end = min(start + self.mega_batch_size, shard_len)
-                
-                # Lecture contiguë forcée par np.array()
+
+                # 1. Lecture contiguë forcée
                 mb_signals = np.array(sig_mmap[start:end]) 
                 mb_labels = lab_all[start:end]
                 mb_lengths = len_all[start:end]
-
                 mb_size = len(mb_signals)
 
-                # Mélange aléatoire des échantillons au sein de la mémoire vive allouée
-                perm = np.random.permutation(mb_size)
-                mb_signals = mb_signals[perm]
-                mb_labels = mb_labels[perm]
-                mb_lengths = mb_lengths[perm]
+                # 2. Tri Bruité
+                # Groupe les tailles proches pour réduire le padding tout en gardant du chaos sain
+                if self.is_train:
+                    noise = np.random.uniform(-0.2, 0.2, size=mb_lengths.shape)
+                    sort_keys = mb_lengths * (1 + noise)
+                else:
+                    sort_keys = mb_lengths  # Déterministe en validation
 
-                # Construction et itération sur les mini-batchs finaux
-                for j in range(0, mb_size, self.batch_size):
-                    batch_idx = list(range(j, min(j + self.batch_size, mb_size)))
-                    cur_bs = len(batch_idx)
+                sort_idx = np.argsort(sort_keys)
+                mb_signals = mb_signals[sort_idx]
+                mb_labels = mb_labels[sort_idx]
+                mb_lengths = mb_lengths[sort_idx]
 
-                    if cur_bs == 1:
+                # 3. Mélange des mini-batchs au sein du Mega-Batch
+                # Empêche le modèle de voir une progression monotone des tailles
+                batch_indices = list(range(0, mb_size, self.batch_size))
+                if self.is_train:
+                    np.random.shuffle(batch_indices)
+
+                for j in batch_indices:
+                    idx_end = min(j + self.batch_size, mb_size)
+
+                    b_sig = mb_signals[j:idx_end]
+                    b_lab = mb_labels[j:idx_end]
+                    b_len = mb_lengths[j:idx_end]
+
+                    cur_bs = len(b_sig)
+                    if cur_bs <= 1: continue
+
+                    if b_len.max() < 50:
+                        # On calcule l'offset global dans le fichier pour savoir de quel échantillon on parle
+                        global_idx_start = start + j
+                        print(f"\n[CRITICAL DATA ERROR]")
+                        print(f"  - Fichier Shard : {os.path.basename(sig_f)}")
+                        print(f"  - Range indices dans shard : [{global_idx_start} : {global_idx_start + cur_bs}]")
+                        print(f"  - Longueurs trouvées dans le batch : {b_len.tolist()}")
+                        print(f"  - Statut : BATCH IGNORÉ (Trop court pour l'architecture CNN)")
+                        print("-" * 30)
                         continue
 
-                    # Stratégie de padding
-                    if self.use_static_padding:
-                        target_t = self.max_signal_length
-                    else:
-                        target_t = int(mb_lengths[batch_idx].max())
+                    # Stratégie de padding dynamique optimisée par le tri
+                    target_t = self.max_signal_length if self.use_static_padding else int(b_len.max())
 
-                    # Allocation du tenseur PyTorch pré-rempli de zéros
-                    batch_x = torch.zeros((cur_bs, 12, target_t), dtype=torch.float32)
+                    # Allocation directe sans initialisation
+                    batch_x = torch.empty((cur_bs, 12, target_t), dtype=torch.float32)
 
-                    # Référence mémoire du mini-batch courant
-                    raw_x = mb_signals[batch_idx]
-
-                    # Remplissage par copie mémoire restreinte à la longueur utile
+                    # Remplissage par copie mémoire et padding ciblé
                     for k in range(cur_bs):
-                        read_len = min(mb_lengths[batch_idx[k]], target_t)
-                        batch_x[k, :, :read_len] = torch.from_numpy(raw_x[k, :, :read_len])
+                        l = b_len[k]
+                        batch_x[k, :, :l] = torch.from_numpy(b_sig[k, :, :l])
+                        if l < target_t:
+                            batch_x[k, :, l:] = 0.0
 
-                    batch_y = torch.from_numpy(mb_labels[batch_idx])
-                    batch_lens = torch.from_numpy(mb_lengths[batch_idx]).long()
+                    batch_y = torch.from_numpy(b_lab)
+                    batch_lens = torch.from_numpy(b_len).long()
 
-                    # Création d'un vecteur temps [0, 1, 2, ..., target_t - 1]
-                    time_steps = torch.arange(target_t).unsqueeze(0)
-
-                    # Masque booléen 2D [cur_bs, target_t] (True si signal valide, False si padding)
-                    mask_bool = time_steps < batch_lens.unsqueeze(1)
-
-                    # Expansion aux 12 canaux et passage en float (1.0 = vrai, 0.0 = pad)
-                    batch_mask = mask_bool.unsqueeze(-1).expand(cur_bs, target_t, 12).float()
-
-                    yield batch_x, batch_y, batch_mask
+                    # On renvoie les longueurs pour que le GPU génère le masque
+                    yield batch_x, batch_y, batch_lens
 
     def __len__(self):
-        """
-        Évalue le nombre total d'itérations prévues sur l'ensemble du dataset.
-        
-        Returns:
-            int: Le nombre estimé de mini-batchs.
-        """
+        """Estimation du nombre total de mini-batchs."""
         return int(np.ceil(self.total_samples / self.batch_size))
