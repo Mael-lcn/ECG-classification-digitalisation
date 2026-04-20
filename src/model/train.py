@@ -11,13 +11,12 @@ import wandb
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 from sklearn.metrics import average_precision_score
 
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from model_factory import get_shared_parser, build_model
+from model_factory import get_shared_parser, build_model, create_dataloader
 from core_utils import (
     setup_global_environment, 
     setup_wandb, 
@@ -289,30 +288,8 @@ def run(args):
 
 
     # 3. Dataloaders
-    dataset_kwargs = {
-        "batch_size": args.batch_size_accumulat,
-        "mega_batch_size": args.batch_size_theoric * args.mega_batch_factor,
-        "use_static_padding": args.use_static_padding,
-        "h": args.input_h, 
-        "w": args.input_w 
-    }
-    if gen_fun: dataset_kwargs["generate_img"] = gen_fun
-
-    train_loader = DataLoader(
-        Dataset_fun(args.train_data, **dataset_kwargs),
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        prefetch_factor=2
-    )
-
-    val_loader = DataLoader(
-        Dataset_fun(args.val_data, is_train=False,  **dataset_kwargs),
-        batch_size=None,
-        num_workers=args.workers,
-        pin_memory=True,
-        prefetch_factor=2
-    )
+    train_loader = create_dataloader(args, args.train_data, Dataset_fun, gen_fun, is_train=True)
+    val_loader = create_dataloader(args, args.val_data, Dataset_fun, gen_fun, is_train=False)
 
     # 4. Compilation PyTorch 2.0
     try:
@@ -366,12 +343,6 @@ def main():
             "If omitted, BCEWithLogitsLoss runs without class weighting."
         )
     )
-
-    # Argument for Cnn Image
-    parser.add_argument('--input_h', type=int, default=512)
-    parser.add_argument('--input_w', type=int, default=512)
-    parser.add_argument('--cnn_mode', type=str, default='square', choices=['square', 'rectangle'],
-                        help="Mode for CNN_Image: 'square' (3x3) or 'rectangle' (half-height)")
 
     args = parser.parse_args()
     run(args)

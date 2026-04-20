@@ -7,7 +7,6 @@ import torch
 import multiprocessing as mp
 from sklearn.metrics import matthews_corrcoef, roc_auc_score, average_precision_score, f1_score, hamming_loss
 from sklearn.utils import resample
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
@@ -16,7 +15,7 @@ project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
 from evaluation import compute_challenge_metric, load_weights
-from model_factory import get_shared_parser, build_model
+from model_factory import get_shared_parser, build_model, create_dataloader
 from core_utils import (
     setup_global_environment,
     setup_wandb,
@@ -260,22 +259,7 @@ def run(args):
     checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
     load_checkpoint(checkpoint_path, model, device=device)
 
-    mb_size = args.batch_size_theoric * args.mega_batch_factor
-    dataset_kwargs = {
-        "batch_size": args.batch_size_accumulat,
-        "mega_batch_size": mb_size,
-        "use_static_padding": args.use_static_padding
-    }
-
-    if gen_fun is not None:
-        dataset_kwargs["generate_img"] = gen_fun
-
-    val_ds = Dataset_fun(data_path=args.data, **dataset_kwargs)
-
-    val_loader = DataLoader(
-        val_ds, batch_size=None, num_workers=args.workers,
-        pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2
-    )
+    val_loader = create_dataloader(args, args.val_data, Dataset_fun, gen_fun, is_train=False)
 
     labels, probs, is_valid = run_inference(
         model, val_loader, device, use_amp, amp_dtype, desc="[Inférence Val]"
@@ -357,7 +341,7 @@ def run(args):
 def main():
     shared_parser = get_shared_parser()
     parser = argparse.ArgumentParser(description="optimisation des seuils multivariée", parents=[shared_parser])
-    parser.add_argument('--data', default="../../../output/final_data/val")
+    parser.add_argument('--val_data', default="../../../output/final_data/val")
     parser.add_argument('-c', '--checkpoint', required=True)
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     args = parser.parse_args()

@@ -21,6 +21,7 @@ from dino import DinoTraceTemporal, DinoStockwell
 from mamba import Mamba2_time_series
 
 # All dataset
+from torch.utils.data import DataLoader
 from TurboDataset import TurboDataset
 from TurboDataset_Img import TurboDataset_Img
 
@@ -82,6 +83,12 @@ def get_shared_parser():
                              help="Force une taille de padding fixe (universelle)")
     group_train.add_argument('--not_use_amp', action='store_false', default=False,
                              help="Désactive l'Automatic Mixed Precision (AMP). Passe en FP32.")
+    group_train.add_argument('--image_width', type=int, default=512,
+                             help="Largeur de l'image d'entrée générée (en pixels).")
+    group_train.add_argument('--image_height', type=int, default=512,
+                             help="Hauteur de l'image d'entrée générée (en pixels).")
+    #group_train.add_argument('--segment_size', type=int, default=4000,
+    #                         help="Taille du segment (nombre d'échantillons) pour le traitement des données.")
 
      # --- 3. Choix du modèle ---
     group_model = parser.add_argument_group("Sélection du Modèle")
@@ -139,6 +146,11 @@ def get_shared_parser():
                             help="Dropout sur les embeddings avant l'encodeur")
     group_vit.add_argument('--patch_size', type=int, nargs='+', default=[5, 5], help="Taille des patches 2D. Ex: --patch_size 5 5")
 
+    # --- 9. Architecture spécifique : CNN Image  ---
+    group_cnnImage = parser.add_argument_group("Spécifique au CNN image")
+    group_cnnImage.add_argument('--cnn_mode', type=str, default='square', choices=['square', 'rectangle'],
+                        help="Mode for CNN_Image: 'square' (3x3) or 'rectangle' (half-height)")
+
     return parser
 
 
@@ -162,3 +174,36 @@ def build_model(args_namespace):
     Dataset_fun, gen_fun = dataset_info
 
     return ModelClass(**valid_kwargs), valid_kwargs, Dataset_fun, gen_fun
+
+
+
+def create_dataloader(args, data_path, Dataset_fun, gen_fun=None, is_train=True):
+    """
+    Crée un DataLoader standardisé pour assurer l'homogénéité entre train, val, et test.
+    Gère automatiquement les kwargs du dataset et les optimisations multiprocessing.
+    """
+    dataset_kwargs = {
+        "batch_size": args.batch_size_accumulat,
+        "mega_batch_size": args.batch_size_theoric * args.mega_batch_factor,
+        "use_static_padding": args.use_static_padding,
+        "h": args.image_height,
+        "w": args.image_width,
+    }
+
+    if gen_fun is not None:
+        dataset_kwargs["generate_img"] = gen_fun
+
+    # Instanciation du dataset
+    dataset = Dataset_fun(data_path=data_path, is_train=is_train, **dataset_kwargs)
+
+    # Création du DataLoader optimisé
+    loader = DataLoader(
+        dataset,
+        batch_size=None,    # None car TurboDataset gère déjà le batching
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=(args.workers > 0),
+        prefetch_factor=2 if args.workers > 0 else None     # Évite un crash si workers=0
+    )
+    
+    return loader

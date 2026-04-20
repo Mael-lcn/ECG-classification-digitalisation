@@ -6,7 +6,6 @@ import argparse
 import numpy as np
 import torch
 
-from torch.utils.data import DataLoader
 import multiprocessing
 import csv
 
@@ -15,7 +14,7 @@ import wandb
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(project_root))
 
-from model_factory import get_shared_parser, build_model
+from model_factory import get_shared_parser, build_model, create_dataloader
 from core_utils import (
     setup_global_environment,
     setup_wandb,
@@ -230,19 +229,8 @@ def main():
     load_checkpoint(checkpoint_path, model, device=device)
 
     # Dataloaders
-    mb_size = args.batch_size_theoric * args.mega_batch_factor
-    dataset_kwargs = {
-        "batch_size": args.batch_size_accumulat,
-        "mega_batch_size": mb_size,
-        "use_static_padding": args.use_static_padding
-    }
-    if gen_fun is not None: dataset_kwargs["generate_img"] = gen_fun
-
-    test_ds = Dataset_fun(data_path=args.data, is_train=False,**dataset_kwargs)
-    test_loader = DataLoader(
-        test_ds, batch_size=None, num_workers=args.workers,
-        pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2
-    )
+    # Dataloaders
+    test_loader = create_dataloader(args, args.data, Dataset_fun, gen_fun, is_train=False)
 
     print("Inférence en cours...")
     labels, probs, _ = run_inference(

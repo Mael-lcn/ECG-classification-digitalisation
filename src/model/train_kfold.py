@@ -8,12 +8,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 
 import wandb
 
 # Importation des briques modulaires
-from model_factory import get_shared_parser, build_model
+from model_factory import get_shared_parser, build_model, create_dataloader
 from core_utils import (
     setup_global_environment, 
     setup_wandb, 
@@ -129,15 +128,8 @@ def run_kfold_pipeline(args):
         scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
         # DataLoaders
-        dataset_kwargs = {
-            "batch_size": args.batch_size_accumulat,
-            "mega_batch_size": args.batch_size_theoric * args.mega_batch_factor,
-            "use_static_padding": args.use_static_padding
-        }
-        if gen_fun: dataset_kwargs["generate_img"] = gen_fun
-
-        train_loader = DataLoader(Dataset_fun(train_path, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
-        val_loader = DataLoader(Dataset_fun(val_path, is_train=False, **dataset_kwargs), batch_size=None, num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0), prefetch_factor=2)
+        train_loader = create_dataloader(args, train_path, Dataset_fun, gen_fun, is_train=True)
+        val_loader = create_dataloader(args, val_path, Dataset_fun, gen_fun, is_train=False)
 
         # On sauvegarde le chemin original pour le restaurer après
         original_ckpt_dir = args.checkpoint_dir
