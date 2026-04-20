@@ -8,7 +8,7 @@ import multiprocessing as mp
 from sklearn.metrics import matthews_corrcoef
 
 
-NEED_COMPILE = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
+NEED_COMPILE = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image', 'CNN_Image'])
 
 
 def setup_global_environment(args):
