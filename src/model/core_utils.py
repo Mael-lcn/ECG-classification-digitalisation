@@ -147,10 +147,12 @@ def run_inference(model, dataloader, device, use_amp, amp_dtype, desc="[Inféren
 
     for x, y, batch_lens in tqdm(dataloader, desc=desc, leave=False):
         if squeeze_batch and x.shape[0] == 1:
-            x, y, batch_lens = x.squeeze(0), y.squeeze(0), batch_lens.squeeze(0)
+            x = x.squeeze(0)
+            y = y.squeeze(0)
+            batch_lens = batch_lens.squeeze(0)
 
-        x = x.to(device, non_blocking=True),
-        y = y.to(device, non_blocking=True),
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
         batch_mask = create_attention_mask(batch_lens, x.shape[2], device)
 
         if x.shape[-1] == 0:
