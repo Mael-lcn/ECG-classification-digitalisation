@@ -211,11 +211,23 @@ def run_training_loop(
                         try: os.remove(f)
                         except OSError: pass
 
+                    # 2. Préparation du checkpoint complet
                     best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
-                    torch.save(model.state_dict(), best_model_path)
+
+                    checkpoint_data = {
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'best_val_pr_auc': best_val_pr_auc
+                    }
+                    if scaler: 
+                        checkpoint_data['scaler_state_dict'] = scaler.state_dict()
+
+                    # 3. Sauvegarde
+                    torch.save(checkpoint_data, best_model_path)
                     wandb.run.summary["best_val_pr_auc"] = best_val_pr_auc
 
-                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_pr_auc:.4f} (Saved)")
+                    print(f"    *** NEW RECORD *** {previous:.4f} -> {best_val_pr_auc:.4f} (Saved with full state)")
                 else:
                     stagnation_counter += 1
                     print(f"    [PATIENCE] {stagnation_counter}/{args.patience} (Best: {best_val_pr_auc:.4f})")
