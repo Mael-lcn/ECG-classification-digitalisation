@@ -8,7 +8,6 @@ class TurboDataset_Img(TurboDataset):
     """
     def __init__(self, data_path, generate_img, h=512, w=512, **kwargs):
         super().__init__(data_path, **kwargs)
-        #self.segment_size = segment_size
         self.h = h
         self.w = w
         self.generate_img = generate_img
@@ -21,7 +20,6 @@ class TurboDataset_Img(TurboDataset):
             batch_images, num_windows = self.generate_img(
                 batch_x, 
                 batch_lens, 
-                #segment_size=self.segment_size,
                 h=self.h, 
                 w=self.w
             )

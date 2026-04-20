@@ -87,7 +87,7 @@ def train_one_epoch(
         use_amp (bool): Indique si l'entraînement doit utiliser la précision mixte automatique.
         amp_dtype (torch.dtype): Le type de données pour la précision mixte.
         accum_steps (int): Le nombre d'étapes d'accumulation de gradients avant chaque mise à jour des poids.
-
+    
     Returns:
         float: La valeur moyenne de la perte calculée sur l'ensemble de l'époque.
     """

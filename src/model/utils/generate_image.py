@@ -25,7 +25,7 @@ distinct_colors = [
 ]
 
 
-def create_image_12leads_together(tracings, lengths=None, h=512, w=512, segment_size=1000, scale_y=2.8, rgb=True):
+def create_image_12leads_together(tracings, lengths=None, h=512, w=512, rgb=True):
     """
     génération d'images ecg où les 12 dérivations sont superposées sur la même figure.
     
@@ -42,6 +42,14 @@ def create_image_12leads_together(tracings, lengths=None, h=512, w=512, segment_
         tuple: (tenseur d'images [b, s, c, h, w], nombre de fenêtres valides par patient [b])
     """
     b, c, time_steps = tracings.shape
+
+    base_ref = 512.0
+
+    # Automatisation des ratios optimaux
+    segment_size = int(w * (1000.0 / base_ref))
+
+    # Amplitude : (2.8/512) * h
+    scale_y = h * (2.7 / base_ref)
 
     # ajout d'un padding temporel si la taille totale n'est pas un multiple exact du segment
     pad_len = (segment_size - (time_steps % segment_size)) % segment_size
@@ -92,7 +100,7 @@ def create_image_12leads_together(tracings, lengths=None, h=512, w=512, segment_
     return final_tensor, num_windows
 
 
-def create_image_12leads_perchan(tracings, lengths=None, h=512, w=512, segment_size=4000):
+def create_image_12leads_perchan(tracings, lengths=None, h=512, w=512):
     """
     génération d'images ecg optimisée où chaque dérivation possède son propre canal visuel.
 
@@ -107,6 +115,11 @@ def create_image_12leads_perchan(tracings, lengths=None, h=512, w=512, segment_s
         tuple: (tenseur d'images [b, s, 12, h, w], nombre de fenêtres valides par patient [b])
     """
     batch_size, channels, time_steps = tracings.shape
+
+    base_ref = 512.0
+
+    ratio_segment = 4000.0 / base_ref
+    segment_size = int(w * ratio_segment)
 
     # alignement de la dimension temporelle
     pad_len = (segment_size - (time_steps % segment_size)) % segment_size
@@ -124,9 +137,11 @@ def create_image_12leads_perchan(tracings, lengths=None, h=512, w=512, segment_s
     else:
         num_windows = torch.full((batch_size,), num_segments, dtype=torch.long)
 
+    fill_ratio = 0.5 - 0.1
+
     sig_clean = segments_np
     max_amp = np.max(np.abs(sig_clean), axis=(1, 3), keepdims=True)
-    scale_y_dynamic = (h * 0.4) / (max_amp + 1e-6)
+    scale_y_dynamic = (h * fill_ratio) / (max_amp + 1e-6)
 
     shift = 4
     mult = 16
@@ -170,24 +185,12 @@ def create_image_12leads_perchan(tracings, lengths=None, h=512, w=512, segment_s
 if __name__ == "__main__":
     file_path = "../../../../output/normalize_data/georgia.hdf5"
     output_path = "../../../../output/img/"
+    os.makedirs(output_path, exist_ok=True)
     h = 512
     w = 512
 
-    os.makedirs(output_path, exist_ok=True)
-
     with h5py.File(file_path, 'r') as f:
         tracings = torch.from_numpy(f['tracings'][:10])
-
-
-    images_tensor, _ = create_image_12leads_perchan(tracings, None, h=518, w=518, segment_size=4000)
-
-    print(f"Format du tenseur genere : {images_tensor.shape}")
-
-    flat_images = images_tensor.view(-1, 12, 518, 518)
-
-    for i in range(min(5, flat_images.size(0))):
-        grid_input = flat_images[i].unsqueeze(1).float() / 255.0
-        vutils.save_image(grid_input, f"../../../../output/img/check_dino_12channels_{i}.png", nrow=4, normalize=False)
 
     """
     images_tensor, _ = create_image_12leads_together(tracings, None, h, w)
@@ -201,6 +204,16 @@ if __name__ == "__main__":
         img_float = flat_images[i].to(torch.float32) / 255.0
         # Enregistrement direct au format image standard
         vutils.save_image(img_float, f"{output_path}/check_dino_1channels_{i}.png")
-
     """
+
+    images_tensor, _ = create_image_12leads_perchan(tracings, None, h, w)
+
+    print(f"Format du tenseur genere : {images_tensor.shape}")
+
+    flat_images = images_tensor.view(-1, 12, h, w)
+
+    for i in range(min(5, flat_images.size(0))):
+        grid_input = flat_images[i].unsqueeze(1).float() / 255.0
+        vutils.save_image(grid_input, f"../../../../output/img/check_dino_12channels_{i}.png", nrow=4, normalize=False)
+
     print(f"Verification terminee : echantillons sauvegardes depuis le tenseur de taille {images_tensor.shape}")

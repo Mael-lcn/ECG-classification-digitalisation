@@ -87,8 +87,6 @@ def get_shared_parser():
                              help="Largeur de l'image d'entrée générée (en pixels).")
     group_train.add_argument('--image_height', type=int, default=512,
                              help="Hauteur de l'image d'entrée générée (en pixels).")
-    #group_train.add_argument('--segment_size', type=int, default=4000,
-    #                         help="Taille du segment (nombre d'échantillons) pour le traitement des données.")
 
      # --- 3. Choix du modèle ---
     group_model = parser.add_argument_group("Sélection du Modèle")
