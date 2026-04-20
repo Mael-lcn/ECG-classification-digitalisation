@@ -18,7 +18,8 @@ class PatchTST_CrossAtt(nn.Module):
                  PT_encoder_layers=3,
                  PT_revin=False,
                  num_classes=27, 
-                 PT_use_cross_att=True):
+                 PT_use_cross_att=True
+                ):
         super().__init__()
 
         self.config = PatchTSTConfig(

@@ -211,7 +211,7 @@ def run_training_loop(
                         try: os.remove(f)
                         except OSError: pass
 
-                    # 2. Préparation du checkpoint complet
+                    # Préparation du checkpoint complet
                     best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
 
                     checkpoint_data = {
@@ -223,7 +223,7 @@ def run_training_loop(
                     if scaler: 
                         checkpoint_data['scaler_state_dict'] = scaler.state_dict()
 
-                    # 3. Sauvegarde
+                    # Sauvegarde
                     torch.save(checkpoint_data, best_model_path)
                     wandb.run.summary["best_val_pr_auc"] = best_val_pr_auc
 
@@ -248,7 +248,7 @@ def run_training_loop(
             torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"backup_{exp_name}_ep{epoch}.pt"))
 
         wandb.log(metrics)
-    
+
     total_train_time_hours = (time.time() - total_start_time) / 3600.0
     wandb.run.summary["total_train_time_hours"] = total_train_time_hours
 
