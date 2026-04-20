@@ -1,8 +1,11 @@
-import os
+import os, time
+import numpy as np
 import torch
 import wandb
 from tqdm import tqdm
-
+import json
+import multiprocessing as mp
+from sklearn.metrics import matthews_corrcoef
 
 
 NEED_COMPILE = set(['PatchTSTModel', 'DinoTraceTemporal', 'ViT_TimeFreq', 'ViT_Image'])
@@ -186,8 +189,7 @@ def load_pos_weight(pos_weight_path, num_classes, device):
 
 def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None):
     """
-    Restaure l'état d'un modèle et optionnellement de son environnement d'entraînement à partir d'un point de sauvegarde (checkpoint).
-
+    Restaure l'état d'un modèle et optionnellement de son environnement d'entraînement à partir d'un point de sauvegarde.
     Gère de manière robuste le chargement des poids du modèle (en nettoyant les éventuels 
     préfixes `_orig_mod.` issus de `torch.compile`), de l'optimiseur, et du scaler AMP.
 
@@ -219,3 +221,125 @@ def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None)
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
     return start_epoch, best_score
+
+
+
+
+def init_eval_env(args):
+    """Initialise le multiprocessing et charge les métadonnées (classes, poids, nsr)."""
+    from evaluation import load_weights
+
+    mp.set_start_method("spawn", force=True)
+    torch.set_num_threads(args.workers)
+
+    with open(args.class_map) as f:
+        classes = json.load(f)
+
+    weight_classes, weights = load_weights(args.weights)
+    assert weight_classes == classes, "Mismatch entre class_map et weights.csv"
+
+    return classes, weights, classes.index("NSR")
+
+
+def run_evaluation_inference(args, data_path, job_type, run_name_prefix):
+    """Gère l'environnement, le modèle, l'inférence et le nettoyage des NaNs."""
+    from model_factory import build_model, create_dataloader
+
+    device, use_amp, amp_dtype = setup_global_environment(args)
+
+    wandb_id = setup_wandb(
+        args=args, job_type=job_type,
+        run_name=f"{run_name_prefix}_{args.model_name}_{wandb.util.generate_id()[:6]}",
+        tags=[job_type, args.model_name]
+    )
+
+    model, _, Dataset_fun, gen_fun = build_model(args)
+    model = model.to(device)
+
+    load_checkpoint(os.path.join(args.checkpoint_dir, args.checkpoint), model, device=device)
+    loader = create_dataloader(args, data_path, Dataset_fun, gen_fun, is_train=False)
+
+    start_time = time.time()
+    labels, probs, is_valid = run_inference(model, loader, device, use_amp, amp_dtype, desc=f"[{job_type}]")
+    inference_time = time.time() - start_time
+
+    if not is_valid:
+        print(f"[WARNING] NaNs détectés lors de l'inférence. Application de l'imputation punitive (0.0).")
+        probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+
+    wandb.log({
+        "performance/temps_inference_sec": inference_time,
+        "performance/fps": len(labels) / inference_time if inference_time > 0 else 0
+    })
+
+    return labels, probs
+
+def log_comprehensive_metrics(labels, probs, thresholds_dict, weights, classes, nsr_index, prefix="eval"):
+    """
+    Calcule et loggue absolument toutes les métriques sur WandB.
+    thresholds_dict doit contenir: {'challenge': array, 'f1': array, 'mcc': array}
+    """
+    from evaluation import (
+        compute_challenge_metric, compute_f_measure, compute_accuracy, 
+        compute_auc, validate_bootstrapping, compute_binary_metrics
+    )
+
+    # 1. Prédictions selon les seuils
+    preds_chal = (probs >= thresholds_dict['challenge']).astype(bool)
+    preds_f1 = (probs >= thresholds_dict['f1']).astype(bool)
+    preds_mcc = (probs >= thresholds_dict['mcc']).astype(bool)
+
+    # 2. Métriques Globales
+    mean_brier = np.mean((probs - labels)**2)
+    mean_auroc, mean_auprc, auroc_per_class, auprc_per_class = compute_auc(labels, probs)
+    chal_score = compute_challenge_metric(weights, labels, preds_chal, classes, classes[nsr_index])
+    macro_f1, f1_per_class = compute_f_measure(labels, preds_f1)
+
+    wandb.log({
+        f"{prefix}_metrics/challenge_score": chal_score,
+        f"{prefix}_metrics/macro_f1": macro_f1,
+        f"{prefix}_metrics/mcc": matthews_corrcoef(labels.flatten(), preds_mcc.flatten()),
+        f"{prefix}_metrics/acc_exact_match": compute_accuracy(labels, preds_chal),
+        f"{prefix}_metrics/mean_auroc": mean_auroc,
+        f"{prefix}_metrics/mean_auprc": mean_auprc,
+        f"{prefix}_metrics/mean_brier_score": mean_brier 
+    })
+
+    # 3. Bootstrapping
+    robustness_metrics, raw_bootstrap = validate_bootstrapping(labels, probs, weights, classes, nsr_index, thresholds_dict['challenge'])
+    wandb.log(robustness_metrics)
+    wandb.log({
+        "distribution_bootstrap/challenge": wandb.Histogram(raw_bootstrap['challenge']),
+        "distribution_bootstrap/macro_f1": wandb.Histogram(raw_bootstrap['macro_f1'])
+    })
+
+    # 4. Tâche Binaire (Sain vs Malade)
+    binary_results, real_sick, pred_sick = compute_binary_metrics(labels, probs, thresholds_dict['challenge'], nsr_index)
+    wandb.log(binary_results)
+    wandb.log({"analyse/matrice_confusion_binaire": wandb.plot.confusion_matrix(
+        preds=pred_sick.astype(int), y_true=real_sick.astype(int), class_names=["Sain (NSR)", "Malade"]
+    )})
+
+    # 5. Métriques par Classe
+    brier_scores_per_class = np.mean((probs - labels)**2, axis=0)
+    tp = np.sum((labels == 1) & (preds_f1 == 1), axis=0)
+    tn = np.sum((labels == 0) & (preds_f1 == 0), axis=0)
+    fp = np.sum((labels == 0) & (preds_f1 == 1), axis=0)
+    fn = np.sum((labels == 1) & (preds_f1 == 0), axis=0)
+    recalls = tp / (tp + fn + 1e-9)
+    specificities = tn / (tn + fp + 1e-9)
+
+    table_data = [
+        [classes[i], f1_per_class[i], auroc_per_class[i], auprc_per_class[i], recalls[i], specificities[i], brier_scores_per_class[i]] 
+        for i in range(len(classes))
+    ]
+    wandb.log({
+        "analyse/performances_par_classe": wandb.Table(
+            columns=["Pathologie", "F1 Score", "AUROC", "AUPRC", "Sensibilité", "Spécificité", "Brier Score"], 
+            data=table_data
+        ),
+        "analyse/f1_par_classe_bar": wandb.plot.bar(
+            wandb.Table(columns=["Pathologie", "F1 Score"], data=[[c, f] for c, f in zip(classes, f1_per_class)]), 
+            "Pathologie", "F1 Score", title="F1 Score par Pathologie"
+        )
+    })
