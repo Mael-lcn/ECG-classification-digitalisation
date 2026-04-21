@@ -343,3 +343,9 @@ def log_comprehensive_metrics(labels, probs, thresholds_dict, weights, classes, 
             "Pathologie", "F1 Score", title="F1 Score par Pathologie"
         )
     })
+
+    return {
+        "challenge_score": float(chal_score),
+        "macro_f1": float(macro_f1),
+        "mcc": float(matthews_corrcoef(labels.flatten(), preds_mcc.flatten()))
+    }
