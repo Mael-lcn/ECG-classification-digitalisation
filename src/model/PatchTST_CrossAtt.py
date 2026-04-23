@@ -9,7 +9,7 @@ from transformers import PatchTSTConfig, PatchTSTModel
 class PatchTST_CrossAtt(nn.Module):
     def __init__(self,
                  in_channels=12,
-                 PT_context_length=1600,
+                 PT_context_length=2000,
                  PT_patch_length=40,
                  PT_patch_stride=20,
                  PT_d_model=128,
@@ -92,7 +92,10 @@ class PatchTST_CrossAtt(nn.Module):
 
             # Application du padding pour obtenir un multiple exact de ctx_len
             x_padded = F.pad(x, (0, pad_len)) 
-            x_chunks = x_padded.view(B, num_chunks, C, ctx_len)
+            x_chunks = x_padded.view(B, C, num_chunks, ctx_len) 
+
+            # 2. On transpose pour avoir [B, num_chunks, C, ctx_len]
+            x_chunks = x_chunks.transpose(1, 2).contiguous()
 
             mask_chunks = None
             if obs_mask is not None:

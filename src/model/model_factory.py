@@ -81,7 +81,7 @@ def get_shared_parser():
                              help="Granularité du tri. Haut = padding optimisé, Bas = + d'aléatoire")
     group_train.add_argument('--use_static_padding', action='store_true', default=False,
                              help="Force une taille de padding fixe (universelle)")
-    group_train.add_argument('--not_use_amp', action='store_false', default=False,
+    group_train.add_argument('--not_use_amp', action='store_true', default=False,
                              help="Désactive l'Automatic Mixed Precision (AMP). Passe en FP32.")
     group_train.add_argument('--image_width', type=int, default=512,
                              help="Largeur de l'image d'entrée générée (en pixels).")

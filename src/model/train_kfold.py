@@ -366,11 +366,11 @@ def main():
     """
     shared_parser = get_shared_parser()
     parser = argparse.ArgumentParser(description="Pipeline de validation croisée (Entraînement -> Optimisation -> Évaluation)", parents=[shared_parser])
-    
+
     parser.add_argument('-k', type=int, default=9, help="Nombre de plis pour la validation croisée.")
     parser.add_argument('--data_dirs', type=str, default="../../../output/final_data/")
     parser.add_argument('--pos_weight_path', type=str, default="../ressources/pos_weight.pt")
-    
+
     parser.add_argument('--resume_from', type=str, default=None, 
                         help="Nom du fichier .pt pour reprendre l'entraînement.")
 

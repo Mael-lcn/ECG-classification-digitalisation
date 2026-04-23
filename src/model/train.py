@@ -59,6 +59,84 @@ def generate_exp_name(args, valid_kwargs, wandb_id):
     return "-".join(exp_parts)
 
 
+def configure_optimizers(model, args):
+    """
+    Configure l'optimiseur et le planificateur de taux d'apprentissage.
+
+    Cette fonction effectue plusieurs opérations de filtrage sur les paramètres du modèle :
+    - Elle ignore les poids gelés (par exemple, pour un modèle pré-entraîné figé).
+    - Elle sépare les poids du modèle de base (backbone) de ceux de la tête (head) afin
+      d'appliquer des taux d'apprentissage distincts.
+    - Elle exclut les biais et les paramètres des couches de normalisation de 
+      l'application du déclin de poids (weight decay).
+
+    L'optimiseur retourné est AdamW, accompagné d'un planificateur OneCycleLR qui
+    gère automatiquement l'augmentation progressive (warmup) puis la descente du taux
+    d'apprentissage.
+
+    Args:
+        model (torch.nn.Module): Le réseau de neurones à optimiser.
+        args (argparse.Namespace): Les arguments d'exécution contenant les hyperparamètres
+            tels que `weight_decay`, `backbone_lr`, `lr` et `epochs`.
+
+    Returns:
+        tuple: Un tuple contenant (optimizer, scheduler).
+    """
+    blacklist_modules = (nn.BatchNorm2d, nn.InstanceNorm2d, nn.LayerNorm)
+    decay = set()
+    no_decay = set()
+
+    # Tri des paramètres pour l'application du weight decay
+    for mn, m in model.named_modules():
+        for pn, p in m.named_parameters(recurse=False):
+
+            # Ignorer les paramètres qui ne nécessitent pas de calcul de gradient
+            if not p.requires_grad:
+                continue 
+
+            fpn = f"{mn}.{pn}" if mn else pn
+
+            # Exclusion des biais et des poids de normalisation du decay
+            if pn.endswith('bias') or (pn.endswith('weight') and isinstance(m, blacklist_modules)):
+                no_decay.add(fpn)
+            else:
+                decay.add(fpn)
+
+    param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+
+    # Création des groupes d'optimisation avec gestion séparée des taux d'apprentissage
+    optim_groups = []
+    for params_set, wd in [(decay, args.weight_decay), (no_decay, 0.0)]:
+        backbone_params = [param_dict[pn] for pn in params_set if "backbone" in pn]
+        head_params = [param_dict[pn] for pn in params_set if "backbone" not in pn]
+
+        if backbone_params:
+            optim_groups.append({
+                "params": backbone_params, 
+                "weight_decay": wd, 
+                "lr": args.backbone_lr
+            })
+        if head_params:
+            optim_groups.append({
+                "params": head_params, 
+                "weight_decay": wd, 
+                "lr": args.lr
+            })
+
+    optimizer = torch.optim.AdamW(optim_groups, fused=True)
+
+    # Configuration du scheduler avec une phase de warmup (10% de l'entraînement par défaut)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=[group['lr'] for group in optim_groups],
+        epochs=args.epochs, 
+        steps_per_epoch=1,
+        pct_start=0.1
+    )
+
+    return optimizer, scheduler
+
+
 def train_one_epoch(
     model,
     dataloader,
@@ -134,6 +212,7 @@ def run_training_loop(
     train_loader,
     val_loader,
     optimizer,
+    scheduler,
     criterion,
     scaler, 
     device,
@@ -218,6 +297,7 @@ def run_training_loop(
                         'epoch': epoch,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
                         'best_val_pr_auc': best_val_pr_auc
                     }
                     if scaler: 
@@ -241,12 +321,13 @@ def run_training_loop(
         # 3. Sauvegarde de sécurité
         if epoch % 5 == 0:
             checkpoint = {
-                'epoch': epoch, 'model_state_dict': model.state_dict(),
+                'epoch': epoch, 'model_state_dict': model.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(), 'best_val_pr_auc': best_val_pr_auc
             }
             if scaler: checkpoint['scaler_state_dict'] = scaler.state_dict()
             torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"backup_{exp_name}_ep{epoch}.pt"))
-
+        
+        scheduler.step()
         wandb.log(metrics)
 
     total_train_time_hours = (time.time() - total_start_time) / 3600.0
@@ -310,13 +391,8 @@ def run(args):
     except Exception as e:
         print(f"[INFO] Torch Compile ignoré: {e}")
 
-    # 5. Optimiseur & Loss
-    param_groups = [
-        {"params": [p for n, p in model.named_parameters() if p.requires_grad and "backbone" in n], "lr": args.backbone_lr, "name": "backbone"},
-        {"params": [p for n, p in model.named_parameters() if p.requires_grad and "backbone" not in n], "lr": args.lr, "name": "head"}
-    ]
 
-    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay, fused=True)
+    optimizer, scheduler = configure_optimizers(model, args)
     criterion = nn.BCEWithLogitsLoss(pos_weight=load_pos_weight(args.pos_weight_path, args.num_classes, device))
     scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
@@ -326,7 +402,7 @@ def run(args):
         best_score = float(wandb.run.summary["best_val_pr_auc"])
 
     # 7. Lancement
-    run_training_loop(args, model, train_loader, val_loader, optimizer, criterion, scaler, device, use_amp, amp_dtype, exp_name, start_epoch, best_score)
+    run_training_loop(args, model, train_loader, val_loader, optimizer, scheduler, criterion, scaler, device, use_amp, amp_dtype, exp_name, start_epoch, best_score)
     wandb.finish()
 
 
