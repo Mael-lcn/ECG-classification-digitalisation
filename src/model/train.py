@@ -416,7 +416,7 @@ def main():
     parser.add_argument('--backbone_lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--patience', type=int, default=10)
-    parser.add_argument('--val_start_epoch', type=int, default=15)
+    parser.add_argument('--val_start_epoch', type=int, default=10)
 
     # Arguments Système
     parser.add_argument('--resume_from', type=str, default=None, 
