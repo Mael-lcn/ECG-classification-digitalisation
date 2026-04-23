@@ -101,8 +101,6 @@ def get_shared_parser():
     group_arch.add_argument('--ch2', type=int, default=64, help="Filtres de la 2ème couche convolutive")
     group_arch.add_argument('--ch3', type=int, default=128, help="Filtres de la 3ème couche convolutive")
     group_arch.add_argument('--dropout', type=float, default=0.5, help="Taux de dropout")
-
-    # Gestion du booléen True par défaut
     group_arch.add_argument('--no_batchnorm', dest='use_batchnorm', action='store_false', default=True,
                             help="Désactive le Batch Normalization (activé par défaut)")
     group_arch.add_argument('--use_fcnn', action='store_true', default=False,
@@ -124,7 +122,8 @@ def get_shared_parser():
 
     # --- 7. Architecture spécifique : Transformer (PatchTST) ---
     group_patchtst = parser.add_argument_group("Spécifique au Transformer (PatchTST)")
-    group_patchtst.add_argument('--PT_context_length', type=int, default=1600, help="Taille de la fenêtre temporelle en entrée")
+    # On aligne le default sur les 2000 points du modèle original
+    group_patchtst.add_argument('--PT_context_length', type=int, default=2000, help="Taille de la fenêtre temporelle en entrée")
     group_patchtst.add_argument('--PT_patch_length', type=int, default=40, help="Taille d'un patch (ex: 40 points = 100ms)")
     group_patchtst.add_argument('--PT_patch_stride', type=int, default=20, help="Chevauchement entre les patchs")
     group_patchtst.add_argument('--PT_d_model', type=int, default=128, help="Dimension interne du Transformer")
