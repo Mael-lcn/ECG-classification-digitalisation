@@ -294,7 +294,8 @@ def run(args):
     labels, probs = run_evaluation_inference(args, args.test_data, "test_eval", "test")
 
     with open(args.config_file) as f:
-        val_configs = json.load(f).get("configurations_optimales", json.load(f))
+        data = json.load(f)
+        val_configs = data.get("configurations_optimales", data)
 
     thresholds_dict = {
         'challenge': np.array([val_configs["challenge_score"]["seuils"][c] for c in classes]),

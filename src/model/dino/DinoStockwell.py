@@ -77,46 +77,47 @@ class DinoStockwell(nn.Module):
         # 1. Chunking & gestion du padding
         num_chunks = (T + self.chunk_size - 1) // self.chunk_size
         pad_size = (num_chunks * self.chunk_size) - T
+        
         if pad_size > 0:
             x = F.pad(x, (0, pad_size))
-            batch_mask = F.pad(batch_mask, (0, 0, 0, pad_size))
+            # batch_mask est [B, T], on pad la dimension T avec des 0.0
+            batch_mask = F.pad(batch_mask, (0, pad_size), value=0.0)
 
         x_chunks = x.view(B, num_chunks, 12, self.chunk_size)
 
-        # Repérer les segments valides via le masque
-        mask_chunks = batch_mask[:, ::self.chunk_size, 0]
-        flat_mask = mask_chunks.reshape(-1).bool() 
+        # Extraire 1 valeur par chunk et forcer le type booléen
+        mask_chunks = batch_mask[:, ::self.chunk_size].bool()
+        flat_mask = mask_chunks.reshape(-1) 
 
-        # 2. Feature extraction
+        # Feature extraction
         x_flat = x_chunks.reshape(-1, 12, self.chunk_size)
         valid_x = x_flat[flat_mask] 
 
         if valid_x.size(0) > 0:
-            # Traitement DINO uniquement sur les segments utiles
             x_vision = self._get_stft_image(valid_x)
             outputs = self.backbone(x_vision)
             valid_features = outputs.last_hidden_state[:, 0, :] # CLS token
 
-            # Reconstruction de la séquence complète pour le Transformer
             full_features = torch.zeros(B * num_chunks, self.embed_dim, 
                                       device=x.device, dtype=valid_features.dtype)
             full_features[flat_mask] = valid_features
         else:
             full_features = torch.zeros(B * num_chunks, self.embed_dim, device=x.device)
 
-        # 3. Raisonnement temporel global
+        # Raisonnement temporel global
         chunk_features = full_features.view(B, num_chunks, -1)
-
-        # Ajout du positionnement
         chunk_features = chunk_features + self.pos_embedding[:, :num_chunks, :]
 
-        # Masquage des segments de padding pour le Transformer
-        temporal_mask = ~mask_chunks.bool() 
+        temporal_mask = ~mask_chunks 
         refined_features = self.temporal_encoder(chunk_features, src_key_padding_mask=temporal_mask)
 
         # Pooling final (Moyenne des segments valides uniquement)
-        refined_features = refined_features * mask_chunks.unsqueeze(-1)
+        # On repasse mask_chunks en float pour les multiplications
+        mask_chunks_float = mask_chunks.float().unsqueeze(-1)
+
+        refined_features = refined_features * mask_chunks_float
         sum_features = refined_features.sum(dim=1)
-        count_features = mask_chunks.sum(dim=1, keepdim=True) + 1e-8
+        count_features = mask_chunks_float.sum(dim=1) + 1e-8
 
         return self.head(sum_features / count_features)
+
