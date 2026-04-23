@@ -179,12 +179,12 @@ def main():
         found_configs = glob.glob(search_pattern)
 
         if not found_configs:
-            raise FileNotFoundError(f"Aucun fichier correspondant à {search_pattern} n'a été trouvé. Veuillez vérifier le chemin ou spécifier --config_file.")
+            raise FileNotFoundError(f"Aucun fichier correspondant à {search_pattern} n'a été trouvé. Veuillez vérifier le chemin ou spécifier --checkpoint.")
 
         args.checkpoint = found_configs[0]
 
         if len(found_configs) > 1:
-            print(f"[WARNING] Plusieurs fichiers de configuration trouvés. Utilisation de : {args.checkpoint}")
+            print(f"[WARNING] Plusieurs fichiers de checkpoint trouvés. Utilisation de : {args.checkpoint}")
 
 
     args.workers = max(4, mp.cpu_count()-1)
