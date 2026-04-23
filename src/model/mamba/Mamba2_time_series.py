@@ -81,10 +81,11 @@ class Mamba2_time_series(nn.Module):
 
         # 3. agrégation temporelle avec gestion exacte du masque
         if batch_mask is not None:
-            # le cnn réduit la longueur par 4 (stride=2 appliqué deux fois)
-            # max_pool1d sur le masque permet de conserver l'alignement avec les features
-            mask_downsampled = torch.nn.functional.max_pool1d(
-                batch_mask.unsqueeze(1).float(), kernel_size=4, stride=4
+            # On force le masque à avoir la taille exacte de la sortie du CNN par interpolation
+            mask_downsampled = torch.nn.functional.interpolate(
+                batch_mask.unsqueeze(1).float(), 
+                size=hidden_states.shape[1], # Taille cible (ex: 734)
+                mode='nearest'
             ).squeeze(1)
 
             # ajout de la dimension pour la diffusion
