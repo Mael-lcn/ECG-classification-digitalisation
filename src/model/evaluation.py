@@ -312,7 +312,7 @@ def main():
     shared_parser = get_shared_parser()
     parser = argparse.ArgumentParser(description="Script d'évaluation finale", parents=[shared_parser])
     parser.add_argument('--test_data', default="../../../output/final_data/test", help="HDF5 test dataset directory")
-    parser.add_argument('-c', '--checkpoint', required=True, help="name of the checkpoint.pt file")
+    parser.add_argument('-c', '--checkpoint', default=None, help="name of the checkpoint.pt file")
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     parser.add_argument('--config_file', type=str, default=None, help="Name of the config file")
 
@@ -331,6 +331,19 @@ def main():
             print(f"[WARNING] Plusieurs fichiers de configuration trouvés. Utilisation de : {args.config_file}")
     else:
         args.config_file = os.path.join(args.checkpoint_dir, args.config_file)
+
+
+    if args.checkpoint is None:
+        search_pattern = os.path.join(args.checkpoint_dir, f"best_model_{args.model_name}*.pt")
+        found_configs = glob.glob(search_pattern)
+
+        if not found_configs:
+            raise FileNotFoundError(f"Aucun fichier correspondant à {search_pattern} n'a été trouvé. Veuillez vérifier le chemin ou spécifier --config_file.")
+
+        args.checkpoint = found_configs[0]
+
+        if len(found_configs) > 1:
+            print(f"[WARNING] Plusieurs fichiers de configuration trouvés. Utilisation de : {args.checkpoint}")
 
     run(args)
 

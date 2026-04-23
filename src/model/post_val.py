@@ -1,4 +1,4 @@
-import os
+import os, glob
 import sys
 import json
 import argparse
@@ -169,9 +169,23 @@ def main():
     shared_parser = get_shared_parser()
     parser = argparse.ArgumentParser(description="optimisation des seuils multivariée", parents=[shared_parser])
     parser.add_argument('--val_data', default="../../../output/final_data/val")
-    parser.add_argument('-c', '--checkpoint', required=True)
+    parser.add_argument('-c', '--checkpoint', default=None)
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
     args = parser.parse_args()
+
+
+    if args.checkpoint is None:
+        search_pattern = os.path.join(args.checkpoint_dir, f"best_model_{args.model_name}*.pt")
+        found_configs = glob.glob(search_pattern)
+
+        if not found_configs:
+            raise FileNotFoundError(f"Aucun fichier correspondant à {search_pattern} n'a été trouvé. Veuillez vérifier le chemin ou spécifier --config_file.")
+
+        args.checkpoint = found_configs[0]
+
+        if len(found_configs) > 1:
+            print(f"[WARNING] Plusieurs fichiers de configuration trouvés. Utilisation de : {args.checkpoint}")
+
 
     args.workers = max(4, mp.cpu_count()-1)
     run(args)
