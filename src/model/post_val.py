@@ -160,7 +160,13 @@ def run(args):
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(final_config, f, indent=4)
 
-    wandb.log_artifact(wandb.Artifact(name="configuration_seuils", type="config").add_file(config_path))
+    # Création de l'artefact
+    config_artifact = wandb.Artifact(name="configuration_seuils", type="config")
+    # Ajout du fichier à l'artefact
+    config_artifact.add_file(config_path)
+    # Envoi de l'artefact vers Weights & Biases
+    wandb.log_artifact(config_artifact)
+    
     wandb.finish()
 
 
