@@ -183,13 +183,13 @@ def create_dataloader(args, data_path, Dataset_fun, gen_fun=None, is_train=True)
     dataset_kwargs = {
         "batch_size": args.batch_size_accumulat,
         "mega_batch_size": args.batch_size_theoric * args.mega_batch_factor,
-        "use_static_padding": args.use_static_padding,
-        "h": args.image_height,
-        "w": args.image_width,
+        "use_static_padding": args.use_static_padding
     }
 
     if gen_fun is not None:
         dataset_kwargs["generate_img"] = gen_fun
+        dataset_kwargs["h"] = args.image_height
+        dataset_kwargs["w"] = args.image_width
 
     # Instanciation du dataset
     dataset = Dataset_fun(data_path=data_path, is_train=is_train, **dataset_kwargs)
