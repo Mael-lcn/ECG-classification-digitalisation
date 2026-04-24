@@ -166,7 +166,7 @@ def run(args):
     config_artifact.add_file(config_path)
     # Envoi de l'artefact vers Weights & Biases
     wandb.log_artifact(config_artifact)
-    
+
     wandb.finish()
 
 
