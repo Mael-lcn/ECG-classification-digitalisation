@@ -397,7 +397,11 @@ def run(args):
     scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
     # 6. Reprise
-    start_epoch, best_score = load_checkpoint(args.resume_from if args.resume_from else "", model, device, optimizer, scaler)
+    start_epoch, best_score = 1, -1.0
+    if args.resume_from:
+        resume_path = os.path.join(args.checkpoint_dir, args.resume_from)
+        start_epoch, best_score = load_checkpoint(resume_path, model, device, optimizer, scaler)
+
     if not args.resume_from and wandb.run.summary.get("best_val_pr_auc"):
         best_score = float(wandb.run.summary["best_val_pr_auc"])
 
