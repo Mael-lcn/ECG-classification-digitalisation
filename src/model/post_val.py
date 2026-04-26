@@ -86,7 +86,7 @@ def optimize_all_metrics(val_labels, val_probs, weights, classes, nsr_index, num
     """
     nsr_name = classes[nsr_index]
     best_thresholds = np.ones(len(classes)) * 0.5
-    candidate_thresholds = np.arange(0.05, 0.41, 0.01)
+    candidate_thresholds = np.arange(0.05, 0.51, 0.01)
 
     best_states = {
         "challenge_score": {"score": -np.inf, "thresholds": best_thresholds.copy()},
