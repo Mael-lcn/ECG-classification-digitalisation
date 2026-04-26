@@ -206,11 +206,11 @@ def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None)
             - best_score (float): Le meilleur score de validation enregistré dans le checkpoint (-1.0 si absent).
     """
     if not os.path.exists(checkpoint_path):
-        return 1, -1.0
+        raise FileNotFoundError(f"[ERREUR CRITIQUE] Impossible de trouver le checkpoint : {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.get('model_state_dict', checkpoint).items()}
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict)
 
     start_epoch = checkpoint.get('epoch', 0) + 1
     best_score = checkpoint.get('best_val_pr_auc', -1.0)

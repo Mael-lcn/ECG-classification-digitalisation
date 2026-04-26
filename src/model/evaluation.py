@@ -341,7 +341,7 @@ def main():
         if not found_configs:
             raise FileNotFoundError(f"Aucun fichier correspondant à {search_pattern} n'a été trouvé. Veuillez vérifier le chemin ou spécifier --checkpoint.")
 
-        args.checkpoint = found_configs[0]
+        args.checkpoint = os.path.basename(found_configs[0])
 
         if len(found_configs) > 1:
             print(f"[WARNING] Plusieurs fichiers de checkpoint trouvés. Utilisation de : {args.checkpoint}")
