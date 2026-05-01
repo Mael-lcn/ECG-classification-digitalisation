@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import random
 import matplotlib.pyplot as plt
@@ -6,8 +5,11 @@ import matplotlib
 from matplotlib.ticker import AutoMinorLocator
 from TemplateFiles.generate_template import generate_template
 from math import ceil 
-from PIL import Image
-import csv
+
+import torch.nn.functional as F
+import torch
+
+
 
 standard_values = {'y_grid_size' : 0.5,
                    'x_grid_size' : 0.2,
@@ -69,11 +71,8 @@ def ecg_plot(
         full_mode,
         store_text_bbox,
         full_header_file,
-        units          = '',
         papersize      = '',
         x_gap          = standard_values['x_gap'],
-        y_gap          = standard_values['y_gap'],
-        display_factor = standard_values['display_factor'],
         line_width     = standard_values['line_width'],
         title          = '',  
         style          = None,
@@ -375,7 +374,7 @@ def ecg_plot(
                     row_height/2-lead_name_offset, 
                     full_mode, 
                     fontsize=lead_fontsize)
-            
+
             if (store_text_bbox):
                 renderer1 = fig.canvas.get_renderer()
                 transf = ax.transData.inverted()
@@ -454,11 +453,6 @@ def ecg_plot(
             current_lead_ds['plotted_pixels'].append([round(yi, 2), round(xi, 2)])
         leads_ds.append(current_lead_ds)
 
-
-
-    head, tail = os.path.split(rec_file_name)
-    rec_file_name = os.path.join(output_dir, tail)
-
     #printed template file
     if print_txt:
         x_offset = 0.05
@@ -497,7 +491,7 @@ def ecg_plot(
         ax.grid(which='major', linestyle='-', linewidth=grid_line_width, color=color_major)
         
         ax.grid(which='minor', linestyle='-', linewidth=grid_line_width, color=color_minor)
-        
+
         if store_configs == 2:
             json_dict['grid_line_color_major'] = [round(x*255., 2) for x in color_major]
             json_dict['grid_line_color_minor'] = [round(x*255., 2) for x in color_minor]
@@ -505,33 +499,27 @@ def ecg_plot(
     else:
         ax.grid(False)
 
-    plt.savefig(os.path.join(output_dir,tail +'.png'),dpi=resolution)
+    # Rendu Matplotlib en RAM
+    fig.canvas.draw()
+    image_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    image_array = image_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
     plt.close(fig)
     plt.clf()
     plt.cla()
 
-    if pad_inches!=0:
-        
-        ecg_image = Image.open(os.path.join(output_dir,tail +'.png'))
-        
-        right = pad_inches * resolution
-        left = pad_inches * resolution
-        top = pad_inches * resolution
-        bottom = pad_inches * resolution
-        width, height = ecg_image.size
-        new_width = width + right + left
-        new_height = height + top + bottom
-        result_image = Image.new(ecg_image.mode, (new_width, new_height), (255, 255, 255))
-        result_image.paste(ecg_image, (left, top))
-        
-        result_image.save(os.path.join(output_dir,tail +'.png'))
-
-        plt.close('all')
-        plt.close(fig)
-        plt.clf()
-        plt.cla()
-
     json_dict["leads"] = leads_ds
 
-    return x_grid_dots,y_grid_dots
-       
+    # On passe en float32, on normalise (0-1) et on met au format [Channels, Height, Width]
+    image_tensor = torch.from_numpy(image_array).float().permute(2, 0, 1) / 255.0
+
+    if pad_inches != 0:
+        pad_pixels = int(pad_inches * resolution)
+        image_tensor = F.pad(
+            image_tensor, 
+            pad=(pad_pixels, pad_pixels, pad_pixels, pad_pixels), 
+            mode='constant', 
+            value=1.0
+        )
+
+    return image_tensor, x_grid_dots, y_grid_dots

@@ -126,7 +126,7 @@ def configure_optimizers(model, args):
 
     # Configuration du scheduler avec une phase de warmup (10% de l'entraînement par défaut)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
+        optimizer,
         max_lr=[group['lr'] for group in optim_groups],
         epochs=args.epochs, 
         steps_per_epoch=1,
@@ -426,8 +426,8 @@ def main():
                         help="Chemin vers un fichier .pt pour reprendre l'entraînement")
 
     # Argumentspos_weight per class
-    parser.add_argument(
-        '--pos_weight_path', type=str, default="../ressources/pos_weight.pt",
+    parser.add_argument(                        # "../ressources/pos_weight.pt"
+        '--pos_weight_path', type=str, default=None,
         help=(
             "Path to the pre-computed pos_weight .pt file "
             "(output of compute_pos_weight.py). "

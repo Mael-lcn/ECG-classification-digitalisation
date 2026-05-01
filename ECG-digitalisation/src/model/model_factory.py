@@ -44,12 +44,6 @@ model_classes = [
     Mamba2_time_series
 ]
 
-DATASET_MAPPING = {
-    'CNN_Image': (TurboDataset_Img, create_image_12leads_perchan),
-    'ViT_Image': (TurboDataset_Img, create_image_12leads_perchan),
-    'DinoTraceTemporal': (TurboDataset_Img, create_image_12leads_together),
-    'DEFAULT': (TurboDataset, None)
-}
 
 
 MODEL_REGISTRY = {cls.__name__: cls for cls in model_classes}

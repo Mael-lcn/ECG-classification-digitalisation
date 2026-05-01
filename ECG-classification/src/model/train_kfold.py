@@ -4,12 +4,10 @@ import shutil
 import glob
 import json
 import argparse
-from pathlib import Path
 import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import multiprocessing as mp
 
 import wandb
@@ -26,7 +24,7 @@ from core_utils import (
     NEED_COMPILE
 )
 
-from train import run_training_loop, generate_exp_name 
+from train import run_training_loop, generate_exp_name, configure_optimizers
 from post_val import optimize_all_metrics
 
 
@@ -66,13 +64,14 @@ def get_kfold_splits(files, k=9, seed=42):
 def create_symlink_fold(fold_dir, train_files, val_files, test_files):
     """
     Crée les liens symboliques pointant vers les fichiers de données pour 
-    les trois ensembles d'un pli spécifique.
+    les trois ensembles d'un pli spécifique, en incluant les fichiers de 
+    signaux, de labels et de métadonnées.
 
     Args:
         fold_dir (str): Chemin du répertoire racine pour le pli.
-        train_files (np.ndarray): Fichiers destinés à l'entraînement.
-        val_files (np.ndarray): Fichiers destinés à la validation.
-        test_files (np.ndarray): Fichiers destinés au test.
+        train_files (np.ndarray): Fichiers signaux destinés à l'entraînement.
+        val_files (np.ndarray): Fichiers signaux destinés à la validation.
+        test_files (np.ndarray): Fichiers signaux destinés au test.
 
     Returns:
         tuple: Chemins des répertoires créés (train, val, test).
@@ -89,9 +88,26 @@ def create_symlink_fold(fold_dir, train_files, val_files, test_files):
     for name, path in dirs.items():
         os.makedirs(path, exist_ok=True)
 
-    for f in train_files: os.symlink(f, os.path.join(dirs["train"], os.path.basename(f)))
-    for f in val_files: os.symlink(f, os.path.join(dirs["val"], os.path.basename(f)))
-    for f in test_files: os.symlink(f, os.path.join(dirs["test"], os.path.basename(f)))
+    # Fonction utilitaire interne pour lier le triplet complet (signal, label, meta)
+    def link_associated_files(files_list, dest_dir):
+        for f in files_list:
+            # 1. Lier le fichier de signaux
+            os.symlink(f, os.path.join(dest_dir, os.path.basename(f)))
+
+            # 2. Lier le fichier de labels associé
+            label_f = f.replace('_signals.npy', '_labels.npy')
+            if os.path.exists(label_f):
+                os.symlink(label_f, os.path.join(dest_dir, os.path.basename(label_f)))
+
+            # 3. Lier le fichier de métadonnées (CSV) associé
+            meta_f = f.replace('_signals.npy', '_meta.csv')
+            if os.path.exists(meta_f):
+                os.symlink(meta_f, os.path.join(dest_dir, os.path.basename(meta_f)))
+
+    # Appliquer la création de liens pour les trois ensembles
+    link_associated_files(train_files, dirs["train"])
+    link_associated_files(val_files, dirs["val"])
+    link_associated_files(test_files, dirs["test"])
 
     return dirs["train"], dirs["val"], dirs["test"]
 
@@ -206,7 +222,7 @@ def run_kfold_pipeline(args):
         args (argparse.Namespace): Arguments de configuration issus de la ligne de commande.
     """
     print(f"[Initialisation] Recherche dans : {args.data_dirs}")
-    all_files = np.array(sorted([str(p.resolve()) for p in Path(args.data_dirs).rglob('*signal.npy') if p.is_file()]))
+    all_files = np.array(sorted(glob.glob(os.path.join(args.data_dirs, '**', '*signals.npy'), recursive=True)))
 
     if len(all_files) == 0: 
         raise ValueError(f"Aucun fichier trouvé dans {args.data_dirs}")
@@ -264,7 +280,8 @@ def run_kfold_pipeline(args):
             {"params": [p for n, p in model.named_parameters() if "backbone" in n], "lr": args.backbone_lr},
             {"params": [p for n, p in model.named_parameters() if "backbone" not in n], "lr": args.lr}
         ]
-        optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay, fused=True)
+        
+        optimizer, scheduler = configure_optimizers(model, args)
         criterion = nn.BCEWithLogitsLoss(pos_weight=load_pos_weight(args.pos_weight_path, args.num_classes, device))
         scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
@@ -291,7 +308,7 @@ def run_kfold_pipeline(args):
             exp_name = generate_exp_name(args, valid_kwargs, fold_wandb_id)
             run_training_loop(
                 args=args, model=model, train_loader=train_loader, val_loader=val_loader,
-                optimizer=optimizer, criterion=criterion, scaler=scaler, device=device,
+                optimizer=optimizer,scheduler=scheduler, criterion=criterion, scaler=scaler, device=device,
                 use_amp=use_amp, amp_dtype=amp_dtype, exp_name=exp_name,
                 start_epoch=start_epoch, best_val_pr_auc=best_score, fold=fold
             )
@@ -367,11 +384,12 @@ def main():
     shared_parser = get_shared_parser()
     parser = argparse.ArgumentParser(description="Pipeline de validation croisée (Entraînement -> Optimisation -> Évaluation)", parents=[shared_parser])
 
-    parser.add_argument('-k', type=int, default=9, help="Nombre de plis pour la validation croisée.")
+    parser.add_argument('-k', type=int, default=5, help="Nombre de plis pour la validation croisée.")
     parser.add_argument('--data_dirs', type=str, default="../../../../output/final_data/")
     parser.add_argument('--pos_weight_path', type=str, default="../ressources/pos_weight.pt")
+    parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
 
-    parser.add_argument('--resume_from', type=str, default=None, 
+    parser.add_argument('--resume_from', type=str, default=None,
                         help="Nom du fichier .pt pour reprendre l'entraînement.")
 
     parser.add_argument('--epochs', type=int, default=60)
