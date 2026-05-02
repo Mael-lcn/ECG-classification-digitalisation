@@ -105,9 +105,11 @@ def configure_optimizers(model, args):
 
     # Création des groupes d'optimisation avec gestion séparée des taux d'apprentissage
     optim_groups = []
-    for params_set, wd in [(decay, args.weight_decay), (no_decay, 0.0)]:
-        backbone_params = [param_dict[pn] for pn in params_set if "backbone" in pn]
-        head_params = [param_dict[pn] for pn in params_set if "backbone" not in pn]
+    for params_set, wd in [(decay, args.weight_decay), (no_decay, 0.0)]:        
+        sorted_params = sorted(list(params_set))
+
+        backbone_params = [param_dict[pn] for pn in sorted_params if "backbone" in pn]
+        head_params = [param_dict[pn] for pn in sorted_params if "backbone" not in pn]
 
         if backbone_params:
             optim_groups.append({
@@ -296,11 +298,10 @@ def run_training_loop(
                         'epoch': epoch,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'best_val_pr_auc': best_val_pr_auc
+                        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                        'scaler_state_dict': scaler.state_dict() if scaler else None,
+                        'best_score': best_val_pr_auc
                     }
-                    if scaler: 
-                        checkpoint_data['scaler_state_dict'] = scaler.state_dict()
 
                     # Sauvegarde
                     torch.save(checkpoint_data, best_model_path)
@@ -358,10 +359,10 @@ def run(args):
     Args:
         args (argparse.Namespace): Configuration globale issue de la ligne de commande.
     """
-    # 1. Setup Global
+    # Setup Global
     device, use_amp, amp_dtype = setup_global_environment(args)
 
-    # 2. WandB (Gère la reprise d'ID automatiquement)
+    # WandB (Gère la reprise d'ID automatiquement)
     wandb_id = wandb.util.generate_id()
     resume_mode = "allow"
     id_file = os.path.join(args.checkpoint_dir, "wandb_run_id.txt")
@@ -378,33 +379,28 @@ def run(args):
     setup_wandb(args, job_type="train", run_name=f"run_{exp_name}", wandb_id=wandb_id, resume_mode=resume_mode)
     with open(id_file, "w") as f: f.write(wandb.run.id)
 
-
-    # 3. Dataloaders
+    # Dataloaders
     train_loader = create_dataloader(args, args.train_data, Dataset_fun, gen_fun, is_train=True)
     val_loader = create_dataloader(args, args.val_data, Dataset_fun, gen_fun, is_train=False)
-
-    # 4. Compilation PyTorch 2.0
-    try:
-        if args.model_name in NEED_COMPILE or args.use_static_padding:
-            model = torch.compile(model)
-    except Exception as e:
-        print(f"[INFO] Torch Compile ignoré: {e}")
-
 
     optimizer, scheduler = configure_optimizers(model, args)
     criterion = nn.BCEWithLogitsLoss(pos_weight=load_pos_weight(args.pos_weight_path, args.num_classes, device))
     scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
 
-    # 6. Reprise
+    # Reprise
     start_epoch, best_score = 1, -1.0
     if args.resume_from:
         resume_path = os.path.join(args.checkpoint_dir, args.resume_from)
-        start_epoch, best_score = load_checkpoint(resume_path, model, device, optimizer, scaler)
+        start_epoch, best_score = load_checkpoint(resume_path, model, device, optimizer, scheduler, scaler)
 
     if not args.resume_from and wandb.run.summary.get("best_val_pr_auc"):
         best_score = float(wandb.run.summary["best_val_pr_auc"])
 
-    # 7. Lancement
+    # Compilation PyTorch 2.0
+    if args.model_name in NEED_COMPILE or args.use_static_padding:
+            model = torch.compile(model)
+
+    # Lancement
     run_training_loop(args, model, train_loader, val_loader, optimizer, scheduler, criterion, scaler, device, use_amp, amp_dtype, exp_name, start_epoch, best_score)
     wandb.finish()
 

@@ -187,7 +187,7 @@ def load_pos_weight(pos_weight_path, num_classes, device):
     return pw.sqrt().to(device)
 
 
-def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None):
+def load_checkpoint(checkpoint_path, model, device, optimizer=None, scheduler=None, scaler=None):
     """
     Restaure l'état d'un modèle et optionnellement de son environnement d'entraînement à partir d'un point de sauvegarde.
     Gère de manière robuste le chargement des poids du modèle (en nettoyant les éventuels 
@@ -206,22 +206,41 @@ def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None)
             - best_score (float): Le meilleur score de validation enregistré dans le checkpoint (-1.0 si absent).
     """
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"[ERREUR CRITIQUE] Impossible de trouver le checkpoint : {checkpoint_path}")
+        raise FileNotFoundError(f"[ERREUR] Checkpoint introuvable : {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.get('model_state_dict', checkpoint).items()}
-    model.load_state_dict(state_dict)
+
+    # 1. Modèle : Nettoyage des clés
+    raw_state_dict = checkpoint.get('model_state_dict', checkpoint)
+    clean_state_dict = {k.replace("_orig_mod.", ""): v for k, v in raw_state_dict.items()}
+    model.load_state_dict(clean_state_dict, strict=False)
 
     start_epoch = checkpoint.get('epoch', 0) + 1
-    best_score = checkpoint.get('best_val_pr_auc', -1.0)
+    best_score = checkpoint.get('best_val_pr_auc', checkpoint.get('best_score', -1.0))
 
+    # 2. Optimiseur : Synchro pour fused=True
     if optimizer and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        for p, state in optimizer.state.items():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    if v.shape == p.shape:
+                        # Clone l'empreinte exacte (Type, Device, Contiguïté)
+                        new_v = torch.empty_like(p, memory_format=torch.preserve_format)
+                        state[k] = new_v.copy_(v)
+                    else:
+                        # Tenseurs 0-D (comme 'step'), on force sur le GPU
+                        state[k] = v.to(device=p.device)
+
+    # 3. Scheduler & Scaler
+    if scheduler and 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     if scaler and 'scaler_state_dict' in checkpoint:
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
+    print(f"[REPRISE] État synchronisé : Epoch {start_epoch}, Score: {best_score:.4f}")
     return start_epoch, best_score
-
 
 
 

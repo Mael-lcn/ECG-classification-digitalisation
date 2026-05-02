@@ -269,17 +269,6 @@ def run_kfold_pipeline(args):
 
         model, valid_kwargs, Dataset_fun, gen_fun = build_model(args)
         model = model.to(device)
-
-        if args.model_name in NEED_COMPILE or args.use_static_padding:
-            try: 
-                model = torch.compile(model)
-            except Exception as e: 
-                print(f"[Avertissement] Échec de la compilation du modèle : {e}")
-
-        param_groups = [
-            {"params": [p for n, p in model.named_parameters() if "backbone" in n], "lr": args.backbone_lr},
-            {"params": [p for n, p in model.named_parameters() if "backbone" not in n], "lr": args.lr}
-        ]
         
         optimizer, scheduler = configure_optimizers(model, args)
         criterion = nn.BCEWithLogitsLoss(pos_weight=load_pos_weight(args.pos_weight_path, args.num_classes, device))
@@ -293,12 +282,15 @@ def run_kfold_pipeline(args):
         if args.resume_from:
             if os.path.exists(args.resume_from):
                 print(f"[Reprise] Restauration depuis le fichier spécifié : {args.resume_from}")
-                start_epoch, best_score = load_checkpoint(args.resume_from, model, device, optimizer, scaler)
+                start_epoch, best_score = load_checkpoint(args.resume_from, model, device, optimizer, scheduler, scaler)
                 args.resume_from = None 
             else:
                 print(f"[Erreur] Le fichier spécifié pour la reprise n'existe pas : {args.resume_from}")
                 print("[Information] Démarrage de l'entraînement initial.")
                 args.resume_from = None
+
+        if args.model_name in NEED_COMPILE or args.use_static_padding:
+            model = torch.compile(model)
 
         original_ckpt_dir = args.checkpoint_dir
         args.checkpoint_dir = fold_ckpt_dir
