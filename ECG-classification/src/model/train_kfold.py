@@ -291,13 +291,12 @@ def run_kfold_pipeline(args):
 
         start_epoch, best_score = 1, -1.0
         if args.resume_from:
-            resume_path = os.path.join(args.checkpoint_dir, args.resume_from)
-            if os.path.exists(resume_path):
-                print(f"[Reprise] Restauration depuis le fichier spécifié : {resume_path}")
-                start_epoch, best_score = load_checkpoint(resume_path, model, device, optimizer, scaler)
+            if os.path.exists(args.resume_from):
+                print(f"[Reprise] Restauration depuis le fichier spécifié : {args.resume_from}")
+                start_epoch, best_score = load_checkpoint(args.resume_from, model, device, optimizer, scaler)
                 args.resume_from = None 
             else:
-                print(f"[Erreur] Le fichier spécifié pour la reprise n'existe pas : {resume_path}")
+                print(f"[Erreur] Le fichier spécifié pour la reprise n'existe pas : {args.resume_from}")
                 print("[Information] Démarrage de l'entraînement initial.")
                 args.resume_from = None
 
@@ -386,11 +385,11 @@ def main():
 
     parser.add_argument('-k', type=int, default=5, help="Nombre de plis pour la validation croisée.")
     parser.add_argument('--data_dirs', type=str, default="../../../../output/final_data/")
-    parser.add_argument('--pos_weight_path', type=str, default="../ressources/pos_weight.pt")
+    parser.add_argument('--pos_weight_path', type=str, default=None)
     parser.add_argument('--weights', default="../../ressources/weights_abbreviations.csv", help="PhysioNet weights.csv")
 
     parser.add_argument('--resume_from', type=str, default=None,
-                        help="Nom du fichier .pt pour reprendre l'entraînement.")
+                        help="Nom du path complet incluant le .pt pour reprendre l'entraînement.")
 
     parser.add_argument('--epochs', type=int, default=60)
     parser.add_argument('--lr', type=float, default=1e-4)
