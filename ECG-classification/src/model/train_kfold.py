@@ -391,7 +391,6 @@ def main():
     parser.add_argument('--val_start_epoch', type=int, default=10)
 
     args = parser.parse_args()
-    args.workers = max(4, mp.cpu_count() - 1)
 
     run_kfold_pipeline(args)
 
