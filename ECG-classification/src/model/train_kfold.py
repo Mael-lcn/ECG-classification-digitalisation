@@ -153,7 +153,7 @@ def execute_post_val(args, model, val_loader, device, use_amp, amp_dtype, classe
         print("[Avertissement] Valeurs invalides détectées. Application de l'imputation (0.0).")
         probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
 
-    best_configs = optimize_all_metrics(labels, probs, weights, classes, nsr_index, epochs=3, num_workers=args.workers)
+    best_configs = optimize_all_metrics(labels, probs, weights, classes, nsr_index, epochs=3, num_workers=max(4, mp.cpu_count()-1))
 
     thresholds_dict = {
         'challenge': best_configs["challenge_score"]["thresholds"],
@@ -177,7 +177,7 @@ def execute_post_val(args, model, val_loader, device, use_amp, amp_dtype, classe
     return final_config
 
 
-def execute_eval(args, model, test_loader, device, use_amp, amp_dtype, classes, weights, nsr_index, config_opti):
+def execute_eval(model, test_loader, device, use_amp, amp_dtype, classes, weights, nsr_index, config_opti):
     """
     Exécute la phase d'évaluation finale sur l'ensemble de test en appliquant 
     les seuils optimisés.
@@ -309,7 +309,7 @@ def run_kfold_pipeline(args):
             load_checkpoint(best_ckpt, model, device)
 
         config_opti = execute_post_val(args, model, val_loader, device, use_amp, amp_dtype, classes, weights, nsr_index, fold_ckpt_dir)
-        test_metrics = execute_eval(args, model, test_loader, device, use_amp, amp_dtype, classes, weights, nsr_index, config_opti)
+        test_metrics = execute_eval(model, test_loader, device, use_amp, amp_dtype, classes, weights, nsr_index, config_opti)
 
         args.checkpoint_dir = original_ckpt_dir 
 
@@ -341,13 +341,13 @@ def run_kfold_pipeline(args):
 
     if completed_folds > 0:
         setup_wandb(args, job_type="kfold_summary", run_name=f"SYNTHESE_kfold_{group_id}", group=group_name)
-        
+
         summary_payload = {}
         for metric_name, values in all_metrics.items():
             mean_val = np.mean(values)
             std_val = np.std(values)
             var_val = np.var(values)
-            
+
             summary_payload[f"global_kfold/mean_{metric_name}"] = mean_val
             summary_payload[f"global_kfold/std_{metric_name}"] = std_val
             summary_payload[f"global_kfold/var_{metric_name}"] = var_val
