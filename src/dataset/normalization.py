@@ -14,7 +14,6 @@ from multiprocessing.pool import ThreadPool
 root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(root))
 
-# 2. On fait un import absolu depuis la racine
 from src.dataset.aux import *
 
 
@@ -333,9 +332,9 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline ECG Mixte avec Budget VRAM")
-    parser.add_argument('-d1', '--dataset1', type=str, default='../../../../output/dataset1/')
-    parser.add_argument('-d2', '--dataset2', type=str, default='../../../../data/15_prct/')
-    parser.add_argument('-o', '--output', type=str, default='../../../../output/normalize_data')
+    parser.add_argument('-d1', '--dataset1', type=str, default='../../../output/dataset1/')
+    parser.add_argument('-d2', '--dataset2', type=str, default='../../../data/15_prct/')
+    parser.add_argument('-o', '--output', type=str, default='../../../output/normalize_data')
     parser.add_argument('-w', '--workers', type=int, default=8, help="Nb de threads (I/O)")
 
     args = parser.parse_args()
