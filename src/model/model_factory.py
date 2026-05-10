@@ -143,6 +143,9 @@ def get_shared_parser():
     group_vit.add_argument('--emb_dropout', type=float, default=0.1,
                             help="Dropout sur les embeddings avant l'encodeur")
     group_vit.add_argument('--patch_size', type=int, nargs='+', default=[5, 5], help="Taille des patches 2D. Ex: --patch_size 5 5")
+    group_vit.add_argument('--d_model', type=int, default=128, help='Embedding dimension for ViT')
+    group_vit.add_argument('--num_heads', type=int, default=4, help='Number of attention heads for ViT')
+    
 
     # --- 9. Architecture spécifique : CNN Image  ---
     group_cnnImage = parser.add_argument_group("Spécifique au CNN image")
@@ -150,11 +153,7 @@ def get_shared_parser():
                         help="Mode for CNN_Image: 'square' (3x3) or 'rectangle' (half-height)")
 
 
-    # --- 10. Architecture spécifique : ViT Image ---
-    group_vitImage = parser.add_argument_group("Spécifique au ViT image")
-    group_vitImage.add_argument('--d_model', type=int, default=128, help='Embedding dimension for ViT')
-    group_vitImage.add_argument('--num_heads', type=int, default=4, help='Number of attention heads for ViT')
-    
+
     return parser
 
 
